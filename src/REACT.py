@@ -167,6 +167,39 @@ def last_boxed_only_string(string):
     return retval
 
 def safe_execute(code_string: str, keys=None):
+    import codecs
+    from io import StringIO
+    from contextlib import redirect_stdout
+    import matplotlib
+    matplotlib.use('Agg')
+
+    new_code_string = codecs.decode(code_string, 'unicode_escape')
+    
+    new_code_string = new_code_string.strip()
+    if new_code_string.startswith("```python"):
+        new_code_string = new_code_string[len("```python"):].strip()
+    if new_code_string.startswith("```"):
+        new_code_string = new_code_string[len("```"):].strip()
+    if new_code_string.endswith("```"):
+        new_code_string = new_code_string[:-3].strip()
+
+    output = None
+    error_message = None
+
+    def _run_code():
+        buffer = StringIO()
+        with redirect_stdout(buffer):
+            exec(new_code_string, globals())
+        return buffer.getvalue()
+
+    try:
+        output = func_timeout.func_timeout(10, _run_code)
+    except func_timeout.FunctionTimedOut:
+        error_message = "TLE"
+    except Exception as e:
+        error_message = str(e)
+
+    return output, error_message
 
     import sys
     from io import StringIO

@@ -1,2 +1,23 @@
-**/.DS_Store
+# virtual env
+mathsensei_env/
+venv/
+.venv/
+
+# python cache
 __pycache__/
+*.pyc
+*.pyo
+
+# env / secrets
+.env
+src/.env
+
+# outputs
+output_MATHSENSEI/
+src/output_MATHSENSEI/
+outputs/
+
+# notebooks / OS junk
+.ipynb_checkpoints/
+.DS_Store
+Thumbs.db

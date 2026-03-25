@@ -12,6 +12,25 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from utilities import *
 from model import solver
 
+def build_readable_record(cache):
+    example = cache.get("example", {})
+
+    return {
+        "pid": cache.get("pid"),
+        "problem": example.get("problem"),
+        "problem_type": example.get("type") or example.get("subject"),
+        "level": example.get("level"),
+        "ground_truth_solution": example.get("solution"),
+        "generated_program": cache.get("program"),
+        "program_output": cache.get("program_executor:output"),
+        "program_error": cache.get("program_executor:error"),
+        "wolfram_query": cache.get("wolfram_alpha_search:input"),
+        "wolfram_output": cache.get("wolfram_alpha_search:output"),
+        "final_generated_solution": cache.get("solution"),
+        "final_answer": cache.get("answer"),
+        "modules_used": cache.get("modules"),
+    }
+
 def parse_args():
 
     # Command line arguments
@@ -46,7 +65,7 @@ def parse_args():
     # program generation
     parser.add_argument('--pg_engine', type=str, default="gpt-3.5-turbo", help='engine for program generation')
     parser.add_argument('--pg_temperature', type=float, default=0.5, help='temperature for program generation')
-    parser.add_argument('--pg_max_tokens', type=int, default=256, help='max tokens for program generation')
+    parser.add_argument('--pg_max_tokens', type=int, default=150, help='max tokens for program generation')
     
     # knowledge retrieval
     parser.add_argument('--kr_engine', type=str, default="gpt-3.5-turbo", help='engine for knowledge retrieval')
@@ -62,8 +81,8 @@ def parse_args():
     # solution_generator
     parser.add_argument('--sg_engine', type=str, default="gpt-3.5-turbo", help='engine for solution generator')
     parser.add_argument('--sg_temperature', type=float, default=0.5, help='temperature for solution generator')
-    parser.add_argument('--sg_max_tokens', type=int, default=600, help='max tokens for solution generator')
-    parser.add_argument('--sg_patience', type=int, default=4, help='patience for solution generator')
+    parser.add_argument('--sg_max_tokens', type=int, default=300, help='max tokens for solution generator')
+    parser.add_argument('--sg_patience', type=int, default=2, help='patience for solution generator')
     
     
     parser.add_argument('--current_index', type=int, default=0, help='index to start')  # Index in dataset to start from
@@ -235,7 +254,7 @@ if __name__ == "__main__":
         solver.current_index+= 1                         # number of current results
         solver.cache["example"] = solver.examples[pid]   # get one example 
         
-        print(solver.cache['example'])
+        print(f"\n[Problem {pid}] {solver.cache['example']['problem'][:140]}...")
         
         if args.dataset == "AQUA":
             solver.cache["example"]["problem"] =  solver.cache["example"]['question'] + " Options:" +  str(solver.cache["example"]['options']) 
@@ -348,6 +367,14 @@ if __name__ == "__main__":
             except Exception as e:
                 print(e)
                 print(solver.cache)
+
+        readable_jsonl = f"{result_root}/{args.label}_{args.test_split}_readable.jsonl"
+        with open(readable_jsonl, "a", encoding="utf-8") as f:
+            try:
+                json.dump(build_readable_record(solver.cache), f, ensure_ascii=False)
+                f.write("\n")
+            except Exception as e:
+                print(e)
 
 
 

@@ -14,7 +14,7 @@ from typing import Union, Any
 from math import isclose
 
 from dotenv import load_dotenv
-load_dotenv(".env")
+load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 
 from langchain.schema import (
     AIMessage,
@@ -63,179 +63,41 @@ llm = AzureChatOpenAI(
 
 
 def safe_execute(code_string: str, keys=None):
-
-    import sys
+    import codecs
     from io import StringIO
-    import signal
-    import time
-    import re
+    from contextlib import redirect_stdout
     import matplotlib
     matplotlib.use('Agg')
-    
+    import func_timeout
 
-    # Code string after strip
-    import codecs
     new_code_string = codecs.decode(code_string, 'unicode_escape')
-    #logging.info(f"Length of code string after conversion: {len(new_code_string)}")
+
+    # 🔥 remove markdown fences if present
+    new_code_string = new_code_string.strip()
+    if new_code_string.startswith("```python"):
+        new_code_string = new_code_string[len("```python"):].strip()
+    if new_code_string.startswith("```"):
+        new_code_string = new_code_string[len("```"):].strip()
+    if new_code_string.endswith("```"):
+        new_code_string = new_code_string[:-3].strip()
 
     output = None
     error_message = None
 
-    def timeout_handler(num, stack):
-       logging.info(f"Received SIGALRM")
-       raise Exception("TLE")
-
-    # Executing the code and capturing the output
-    old_stdout = sys.stdout
-
-    signal.signal(signal.SIGALRM, timeout_handler)
-    signal.alarm(10)
+    def _run_code():
+        buffer = StringIO()
+        with redirect_stdout(buffer):
+            exec(new_code_string, globals())
+        return buffer.getvalue()
 
     try:
-        # Redirect stdout and stderr to capture the output and error message
-        sys.stdout = StringIO()
-        
-        # Execute the code
-        exec(new_code_string,globals())
-
-        # Get the captured output
-        output = sys.stdout.getvalue()
-
+        output = func_timeout.func_timeout(10, _run_code)
+    except func_timeout.FunctionTimedOut:
+        error_message = "TLE"
     except Exception as e:
         error_message = str(e)
-    
-    # Reset alarm
-    signal.alarm(0)
 
-    # Restore the original stdout and stderr
-    sys.stdout = old_stdout
-   
-
-    return output, error_message   
-
-
-# Code davinci 002 response function
-def get_codex_response(prompt, temperature, max_tokens=256, top_p=1, n=1, patience=10, sleep_time=10):
-    while patience > 0:
-        patience -= 1
-        try:
-            logging.info(f"----Response starts-----")
-            response = openai.Completion.create(prompt = prompt,
-                                                engine=os.environ['OPENAI_CODEDAVC002_DEPLOYMENT_NAME'],
-                                                temperature=temperature,
-                                                max_tokens=max_tokens,
-                                                top_p=0.5,
-                                                frequency_penalty=0,
-                                                presence_penalty=0,
-                                                best_of=1,
-                                                stop=["Question"])
-            
-            logging.info(f"-------Response ends-------")
-            
-            prediction = response["choices"][0]["text"].strip()
-            
-            if prediction != "" and prediction != None:
-                logging.info(f"Going into sleep")
-                time.sleep(sleep_time)
-                logging.info(f"Out of sleep")
-                return prediction
-
-        except Exception as e:
-            logging.info(f"{e}")
-            if sleep_time > 0:
-                logging.info(f"Going into sleep")
-                time.sleep(sleep_time)
-                logging.info(f"Out of sleep")
-
-    return ""
-
-def get_codellama_response(tokenizer,pipeline,prompt,temperature=0.5):
-    
-    system = "Follow the format of the examples given below"
-
-    # Prompt in CodeLlama format
-    #prompt = prompt = f"<s>[INST] <<SYS>>\\n{system}\\n<</SYS>>\\n\\n{prompt}[/INST]"
-    
-    #prompt = f"<s>[INST] {prompt.strip()} [/INST]"
-    prompt = prompt + "\nfrom sympy import *"
- 
-    sequences = pipeline(
-    prompt,
-    do_sample=True,
-    top_k=10,
-    temperature=temperature,
-    top_p=0.5,
-    num_return_sequences=1,
-    eos_token_id=tokenizer.eos_token_id,
-    max_new_tokens=500,
-    return_full_text=False
-    )
-    
-    response = ""
-
-    for seq in sequences:
-        response = response + (seq['generated_text'])
-    
-    # Remove the part after the first word "Question"
-    index = response.find("Question")
-
-    if index !=-1:
-        response = response[:index]
-
-    response = "from sympy import *\n" + response    
-
-    return response   
-
-
-def get_wizard_coder_response(tokenizer,model,prompt,temperature=0.5):
-    
-    from transformers import AutoTokenizer, AutoModelForCausalLM, GenerationConfig
-    import torch
-
-    prompt = prompt + "\n### Response: \nfrom sympy import *"
- 
-    # Tokenize the prompt
-    inputs = tokenizer(prompt, return_tensors="pt",truncation=True, padding=True)
-  
-    # Generation Config
-    generation_config = GenerationConfig(
-        temperature=temperature,
-        do_sample=True,
-        top_p=0.5,
-        eos_token_id=tokenizer.eos_token_id,
-        pad_token_id=tokenizer.pad_token_id,
-    )
-
-    with torch.no_grad():
-        
-        generate_ids = model.generate(
-            input_ids=inputs.input_ids,
-            generation_config=generation_config,
-            return_dict_in_generate=True,
-            output_scores=True,
-            max_new_tokens=500,
-        )
-    
-    s = generate_ids.sequences
-    response = tokenizer.batch_decode(s, skip_special_tokens=True)
-    
-
-    try :
-        index1 = response.find("\nfrom sympy import *")
-        response = response[index1:]
-    except:
-        pass
-
-    # Remove the part after the first word "Question"
-    index = response.find("Question")
-
-    if index !=-1:
-        response = response[:index]
-
-        
-    return response  
-
-
+    return output, error_message
 
 
 def get_llama_response(tokenizer,pipeline,prompt,temperature=0.5):
@@ -319,7 +181,7 @@ def get_textdavinci002_response(prompt, temperature, max_tokens, n=1, patience=1
         try:
             response = openai.Completion.create(engine=os.environ['OPENAI_TEXTDAVC002_DEPLOYMENT_NAME'],
                                                 prompt=prompt,
-                                                api_key=api_key,
+                                                api_key=openai.api_key,
                                                 temperature=temperature,
                                                 max_tokens=500,
                                                 top_p=0.5,
