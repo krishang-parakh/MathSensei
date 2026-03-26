@@ -147,7 +147,7 @@ def _sleep_if_needed(sleep_time: float) -> None:
         logging.info("---------Sleep ends----------")
 
 
-def get_textdavinci002_response(prompt, temperature, max_tokens, n=1, patience=1, sleep_time=2):
+def get_textdavinci002_response(prompt, temperature, max_tokens, n=1, patience=1, sleep_time=0):
     deployment = _get_env("OPENAI_TEXTDAVC002_DEPLOYMENT_NAME", required=True)
     last_error = None
 
@@ -173,7 +173,7 @@ def get_textdavinci002_response(prompt, temperature, max_tokens, n=1, patience=1
     raise RuntimeError(f"text-davinci-002 call failed after retries: {last_error}")
 
 
-def get_textdavinci003_response(prompt, temperature, max_tokens, n=1, patience=1, sleep_time=2):
+def get_textdavinci003_response(prompt, temperature, max_tokens, n=1, patience=1, sleep_time=0):
     deployment = _get_env("OPENAI_TEXTDAVC003_DEPLOYMENT_NAME", required=True)
     last_error = None
 
@@ -256,7 +256,7 @@ def get_chat_response_code(
     stop=None,
     n=1,
     patience=10,
-    sleep_time=5,
+    sleep_time=0,
 ):
     logging.info("----Response starts-----")
 
@@ -303,7 +303,7 @@ def get_gemini_response(full_prompt):
                 continue
 
 
-def get_chat_response(messages, temperature=0, max_tokens=256, n=1, patience=1, sleep_time=2):
+def get_chat_response(messages, temperature=0, max_tokens=256, n=1, patience=1, sleep_time=0):
     logging.info("CHATGPT CALLED")
     logging.info("----Response starts-----")
 
