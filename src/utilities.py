@@ -107,7 +107,7 @@ def get_llama_response(tokenizer, pipeline, prompt, temperature=0.5):
         top_p=0.5,
         num_return_sequences=1,
         eos_token_id=tokenizer.eos_token_id,
-        max_new_tokens=300,
+        max_new_tokens=3000,
         return_full_text=False,
     )
 
@@ -128,7 +128,7 @@ def get_llama_13bresponse(tokenizer, pipeline, prompt, temperature=0.5):
         top_p=0.5,
         num_return_sequences=1,
         eos_token_id=tokenizer.eos_token_id,
-        max_new_tokens=300,
+        max_new_tokens=3000,
         return_full_text=False,
     )
 
@@ -205,7 +205,7 @@ def get_gpt3_response(
     api_key,
     engine="text-davinci-002",
     temperature=0,
-    max_tokens=256,
+    max_tokens=5000,
     top_p=1,
     n=1,
     patience=100,
@@ -234,7 +234,7 @@ def get_gpt3_response(
     raise RuntimeError(f"GPT3 completion failed after retries: {last_error}")
 
 
-def _chat_completion(messages, temperature=0.0, max_tokens=256, stop=None):
+def _chat_completion(messages, temperature=0.0, max_tokens=5000, stop=None):
     kwargs = {
         "model": AZURE_DEPLOYMENT_NAME,
         "messages": messages,
@@ -251,7 +251,7 @@ def _chat_completion(messages, temperature=0.0, max_tokens=256, stop=None):
 def get_chat_response_code(
     context,
     temperature=0.5,
-    max_tokens=256,
+    max_tokens=5000,
     system_mess=None,
     stop=None,
     n=1,
@@ -303,7 +303,7 @@ def get_gemini_response(full_prompt):
                 continue
 
 
-def get_chat_response(messages, temperature=0, max_tokens=256, n=1, patience=1, sleep_time=0):
+def get_chat_response(messages, temperature=0, max_tokens=5000, n=1, patience=1, sleep_time=0):
     logging.info("CHATGPT CALLED")
     logging.info("----Response starts-----")
 

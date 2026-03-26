@@ -254,8 +254,6 @@ if __name__ == "__main__":
         solver.current_index+= 1                         # number of current results
         solver.cache["example"] = solver.examples[pid]   # get one example 
         
-        print(f"\n[Problem {pid}] {solver.cache['example']['problem'][:140]}...")
-        
         if args.dataset == "AQUA":
             solver.cache["example"]["problem"] =  solver.cache["example"]['question'] + " Options:" +  str(solver.cache["example"]['options']) 
         
@@ -274,6 +272,13 @@ if __name__ == "__main__":
             lvl = str(solver.cache["example"]["level"])
             solver.cache["response"] = f"\nMathematics Problem Type:{typ}\nLevel of Problem:{lvl}"
         
+        problem_preview = (
+            solver.cache["example"].get("problem")
+            or solver.cache["example"].get("question")
+            or solver.cache["example"].get("Question")
+            or str(solver.cache["example"])
+        )
+        print(f"\n[Problem {pid}] {problem_preview[:140]}...")
         
         if args.modules is not None:
             modules = args.modules

@@ -886,13 +886,13 @@ class solver:
         ]
 
         if self.wolfram_model == 'text_davinci_003':
-            answer = get_textdavinci003_response(full_prompt,temperature=0.5, max_tokens=500)
+            answer = get_textdavinci003_response(full_prompt,temperature=0.5, max_tokens=5000)
             
         elif self.wolfram_model == 'gemini':
             answer = get_gemini_response(full_prompt)      
             
         else:
-                answer = get_chat_response(messages = messages,temperature = 0.5, max_tokens=256)
+                answer = get_chat_response(messages = messages,temperature = 0.5, max_tokens=5000)
                 
         return answer
     
@@ -1266,7 +1266,7 @@ class solver:
         (5) Code has an abrupt end, or code contains natural language sentences instead of python syntax.
         """
         
-        code_fixer_response = get_chat_response_code(full_prompt,temperature = 0.7, max_tokens=500,system_mess=system_message)
+        code_fixer_response = get_chat_response_code(full_prompt,temperature = 0.7, max_tokens=5000,system_mess=system_message)
         logging.info(f"Code-fixer response {code_fixer_response}")
         
         # Parse output to get new program
@@ -1526,9 +1526,9 @@ class solver:
         while(f<num_tries):
             f+=1
             if self.bing_model == 'text_davinci_003': # Check text-davinci-003
-                query_output = get_textdavinci003_response(full_prompt,temperature=0.5, max_tokens=500)
+                query_output = get_textdavinci003_response(full_prompt,temperature=0.5, max_tokens=5000)
             else:    
-                query_output = get_chat_response(messages, temperature=0.5, max_tokens=500)
+                query_output = get_chat_response(messages, temperature=0.5, max_tokens=5000)
             
             if query_output.find("Query:")!= -1:
                 break
@@ -1577,7 +1577,7 @@ class solver:
 
         
         if self.bing_model == 'text_davinci_003':  # Check text-davinci-003
-            info_bing1 = get_textdavinci003_response(full_prompt_extract1,temperature=0.5, max_tokens=500)
+            info_bing1 = get_textdavinci003_response(full_prompt_extract1,temperature=0.5, max_tokens=5000)
         else:
             info_bing1 = get_chat_response(messages1, temperature=0.5, max_tokens=500)
         
@@ -1588,9 +1588,9 @@ class solver:
 
         
         if self.bing_model == 'text_davinci_003': # Check text-davinci-003
-            info_bing2 = get_textdavinci003_response(full_prompt_extract2,temperature=0.5, max_tokens=500)
+            info_bing2 = get_textdavinci003_response(full_prompt_extract2,temperature=0.5, max_tokens=5000)
         else:
-            info_bing2 = get_chat_response(messages2, temperature=0.5, max_tokens=500)
+            info_bing2 = get_chat_response(messages2, temperature=0.5, max_tokens=5000)
         
         
         # Concatenate bing responses from query 'question' and 'query2' using context

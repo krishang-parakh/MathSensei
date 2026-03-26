@@ -290,7 +290,7 @@ def last_boxed_only_string(string):
     
     return retval
 
-def get_chat_response(context,stop=None,temperature=0.5, max_tokens=256, n=1, patience=10, sleep_time=5,system_mess=None):
+def get_chat_response(context,stop=None,temperature=0.5, max_tokens=5000, n=1, patience=10, sleep_time=0,system_mess=None):
     
     from langchain.schema.messages import HumanMessage, SystemMessage
     import time 
@@ -372,7 +372,7 @@ def code_fixer(error_program,error_message):
        
         #print("Full prompt ",test_prompt)
 
-        code_fixer_response = get_chat_response(full_prompt,temperature = 0.5, max_tokens=500,system_mess=system_message)
+        code_fixer_response = get_chat_response(full_prompt,temperature = 0.5, max_tokens=5000,system_mess=system_message)
         
         print("Code-fixer response",code_fixer_response)
         # Parse output to get new program
@@ -472,7 +472,7 @@ def knowledge_retrieval(query,context):
 def call_answer_cleaner(q, res):
         res = str(res)
         full_prompt = f"I called Wolfram alpha API using {q} and it gave me this answer as a dictionary object.\n {res}\n.Can you get the answer for me from this object?"
-        answer = get_chat_response(full_prompt,max_tokens=400)
+        answer = get_chat_response(full_prompt,max_tokens=4000)
         return answer
 
 def remove_backticks(input_str):
@@ -497,7 +497,7 @@ def wolframalpha_generator(question,context):
             
             #print(f"Try {tries}")
             # Execute the module
-            query = get_chat_response(demo_prompt + "\nContext:\n" + context+ f"Task:{question}" +"\nThought:",stop=["Context:"],max_tokens=600)
+            query = get_chat_response(demo_prompt + "\nContext:\n" + context+ f"Task:{question}" +"\nThought:",stop=["Context:"],max_tokens=6000)
             #print(query)
             print(f"Query {str(tries)}:",query)
             tries+=1
@@ -586,7 +586,7 @@ def bing_search(question,context):
         demo_prompt = prompt_bing_query_REACT.prompt
        
         while(True): # Continue till we get query
-            query_output = get_chat_response(demo_prompt + "\nContext:\n" + context+ f"Task:{question}" +"\nThought:",stop=["Context:"], temperature=0.5, max_tokens=500)
+            query_output = get_chat_response(demo_prompt + "\nContext:\n" + context+ f"Task:{question}" +"\nThought:",stop=["Context:"], temperature=0.5, max_tokens=5000)
             #print(query_output)
             if query_output.find("Query:")!= -1:
                 break
@@ -623,8 +623,8 @@ def bing_search(question,context):
         full_prompt_extract2 = demo_prompt_extract + test_prompt_extract2
         
         
-        info_bing1 = get_chat_response(full_prompt_extract1, temperature=0.5, max_tokens=500)
-        info_bing2 = get_chat_response(full_prompt_extract2, temperature=0.5, max_tokens=500)
+        info_bing1 = get_chat_response(full_prompt_extract1, temperature=0.5, max_tokens=5000)
+        info_bing2 = get_chat_response(full_prompt_extract2, temperature=0.5, max_tokens=5000)
         
         print("Info Bing 1",info_bing1)
         print("Info Bing 2",info_bing2)
