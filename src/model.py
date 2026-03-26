@@ -907,118 +907,152 @@ class solver:
 
     
     def wolfram_alpha_search(self):
-        
-        app_id = os.environ["WOLFRAM_ALPHA_APPID"] 
+        app_id = os.environ["WOLFRAM_ALPHA_APPID"]
 
-        # get the example
         question_text = self.get_question_text()
         response = self.cache["response"] if "response" in self.cache else ""
-        
+
         if self.dataset == "AQUA":
             demo_prompt = prompt_walpha_context_withthought.prompt_AQUA.strip()
         elif self.dataset == "MMLU":
-            demo_prompt = prompt_walpha_context_withthought.prompt_MMLU.strip() 
+            demo_prompt = prompt_walpha_context_withthought.prompt_MMLU.strip()
         elif self.dataset == "GSM":
-            demo_prompt = prompt_walpha_context_withthought.prompt_GSM.strip() 
+            demo_prompt = prompt_walpha_context_withthought.prompt_GSM.strip()
         else:
             demo_prompt = prompt_walpha_context_withthought.prompt.strip()
-        
+
         try:
-            ind = (self.modules).index('query_generator')
-        except:  
+            ind = self.modules.index('query_generator')
+        except:
             ind = None
 
-        if ind!=None:
-            mods = (self.modules)[:ind]
-            mods = ' '.join(mods)
+        if ind is not None:
+            mods = self.modules[:ind]
+            mods = " ".join(mods)
         else:
-            mods = ""    
-        
-        if response != "" and mods!="":
+            mods = ""
+
+        if response != "" and mods != "":
             test_prompt = f"Question:{question_text}\nModules used till now:[{mods}]\n{response}\nThought:"
         else:
             test_prompt = f"Question: {question_text}\nThought:"
 
-
-        # full prompt
         full_prompt = demo_prompt + "\n" + test_prompt
-        
-        messages=[
+
+        messages = [
             {"role": "user", "content": full_prompt},
         ]
-        
+
+        def clean_wolfram_query(q):
+            if q is None:
+                return None
+
+            q = q.strip()
+
+            # Remove markdown/code fences
+            if q.startswith("```python"):
+                q = q[len("```python"):].strip()
+            elif q.startswith("```"):
+                q = q[len("```"):].strip()
+            if q.endswith("```"):
+                q = q[:-3].strip()
+
+            # Remove backticks
+            q = q.replace("`", "")
+            
+            q = q.replace("**", "")
+            q = q.replace("\\[", "").replace("\\]", "")
+
+            # Remove leading bullets / bold markers
+            while q.startswith("*") or q.startswith("-"):
+                q = q[1:].strip()
+
+            # Remove surrounding LaTeX inline wrappers
+            if q.startswith("\\(") and q.endswith("\\)"):
+                q = q[2:-2].strip()
+            if q.startswith("$") and q.endswith("$"):
+                q = q[1:-1].strip()
+                
+            if q.startswith("{") and q.endswith("}"):
+                q = q[1:-1].strip()
+
+            # Remove trailing punctuation that hurts WA
+            q = q.strip()
+            while len(q) > 0 and q[-1] in [".", ",", ";", ":"]:
+                q = q[:-1].strip()
+
+            # Collapse newlines
+            q = " ".join(q.split())
+
+            return q
+
         tries = 0
         answer_walpha = None
-        q=None
-        
-        while(tries<3):
-            # execute the module
-            
+        q = None
+        thought = ""
+        query = ""
+
+        while tries < 3:
             if self.wolfram_model == 'text_davinci_003':
-                query = get_textdavinci003_response(full_prompt,temperature=0.5, max_tokens=600)
-                
+                query = get_textdavinci003_response(full_prompt, temperature=0.5, max_tokens=600)
             elif self.wolfram_model == 'gemini':
-                query = get_gemini_response(full_prompt) 
-            
+                query = get_gemini_response(full_prompt)
             else:
-                query = get_chat_response(messages = messages,temperature = 0.5, max_tokens=600)
-                
-           
-            tries+=1
-            
-            # Check if we get the right format 
-            if query.find("Final Query:") == -1 or query.find("Final Query:") is None:
+                query = get_chat_response(messages=messages, temperature=0.5, max_tokens=600)
+
+            tries += 1
+
+            if query is None or "Final Query:" not in query:
                 continue
-            else:
-                
-                # Call the Wolfram Alpha API
-                client = wolframalpha.Client(app_id)
-                
-                # Extract the thought 
-                try:
-                    i2 = query.find("Answer:")
-                    thought = query[:i2]
-                except:
-                    thought = ""    
-                
-                index = query.find("Final Query:") + len("Final Query:") 
-                q = query[index:]
-                q = self.remove_backticks(q)
-                
-                
-                try: 
-                    res = client.query(q)
-                except:
-                    logging.error("Error 403")
-                    continue   
-                
-                #logging.info(f"{res}")
-                 # Got res
-                
-                if res['@success'] == True:
-                    answer_walpha = self.call_answer_cleaner(q,res)
+
+            client = wolframalpha.Client(app_id)
+
+            try:
+                i2 = query.find("Answer:")
+                thought = query[:i2] if i2 != -1 else ""
+            except:
+                thought = ""
+
+            index = query.find("Final Query:") + len("Final Query:")
+            q = query[index:]
+            q = self.remove_backticks(q)
+            q = clean_wolfram_query(q)
+
+            if q is None or q == "":
+                continue
+
+            try:
+                res = client.query(q)
+            except Exception as e:
+                logging.error(f"Wolfram Alpha query failed: {e}")
+                continue
+
+            try:
+                success_flag = res["@success"]
+            except:
+                success_flag = False
+
+            if success_flag is True:
+                answer_walpha = self.call_answer_cleaner(q, res)
+                if answer_walpha is not None and answer_walpha != "":
                     break
-                else:
-                    logging.info(f"\nSuccess is False {str(tries)}")
-                    answer_walpha = None
-                    continue
-                   
-                
-        if  answer_walpha!= "" and answer_walpha is not None:
+            else:
+                logging.info(f"\nSuccess is False {tries}")
+                answer_walpha = None
+                continue
+
+        if answer_walpha != "" and answer_walpha is not None:
             response += f"\nWolfram Thought:{thought}\nQuery Generator: {q}\n Wolfram_Alpha response:: {answer_walpha}\n"
             response = response.strip()
-       
-        
-        # update the cache
+
         self.cache["query"] = q
         self.cache["response"] = response
         self.cache["query_generator:input"] = test_prompt
         self.cache["query_generator:output"] = query
-        self.cache["wolfram_alpha_search:input"]  = q
+        self.cache["wolfram_alpha_search:input"] = q
         self.cache["wolfram_alpha_search:output"] = answer_walpha
-        return q, answer_walpha
-    
-   
+
+        return q, answer_walpha   
         
     def get_wiki_summary_(self,query):
         import wikipedia
@@ -1129,54 +1163,92 @@ class solver:
     
     
     def program_generator(self):
-       
         test_prompt, full_prompt = self.build_prompt_for_pg()
-        
 
-        messages=[
+        messages = [
             {"role": "user", "content": full_prompt},
         ]
-        
-        
-        # Get the response till now 
+
         response = self.cache["response"] if "response" in self.cache else ""
-        
-        # execute the module
-        if  self.python_model=='no':
-            program = get_chat_response(messages = messages,temperature = self.pg_temperature, max_tokens=self.pg_max_tokens)
 
-        elif self.python_model=='gemini':
+        if self.python_model == 'no':
+            program = get_chat_response(
+                messages=messages,
+                temperature=self.pg_temperature,
+                max_tokens=self.pg_max_tokens
+            )
+
+        elif self.python_model == 'gemini':
             program = get_gemini_response(full_prompt)
-        
-        elif self.python_model=='code_davinci002':
-            program = get_codex_response(prompt=full_prompt,temperature=self.pg_temperature)
 
-        elif self.python_model=='code_llama7b_python':   
-            program = get_codellama_response(self.python_tokenizer,self.python_pipeline,prompt=full_prompt,temperature=self.pg_temperature)
+        elif self.python_model == 'code_davinci002':
+            program = get_codex_response(
+                prompt=full_prompt,
+                temperature=self.pg_temperature
+            )
 
-        elif self.python_model=='code_llama13b_python':   
-            program = get_codellama_response(self.python_tokenizer,self.python_pipeline,prompt=full_prompt,temperature=self.pg_temperature)
+        elif self.python_model in [
+            'code_llama7b_python',
+            'code_llama13b_python',
+            'code_llama34b',
+            'code_llama34b_pythonV1'
+        ]:
+            program = get_codellama_response(
+                self.python_tokenizer,
+                self.python_pipeline,
+                prompt=full_prompt,
+                temperature=self.pg_temperature
+            )
+
+        elif self.python_model == 'wizardcoder_34B':
+            program = get_wizard_coder_response(
+                self.python_tokenizer,
+                self.model_code,
+                prompt=full_prompt,
+                temperature=self.pg_temperature
+            )
+        else:
+            program = ""
+
+        if program is None:
+            program = ""
+
+        program = program.strip().strip('"').strip("'")
+
+        # Remove markdown fences
+        if program.startswith("```python"):
+            program = program[len("```python"):].strip()
+        elif program.startswith("```"):
+            program = program[len("```"):].strip()
+
+        if program.endswith("```"):
+            program = program[:-3].strip()
+            
+        cleaned_lines = []
+        for line in program.splitlines():
+            stripped = line.strip()
+
+            if stripped.startswith("Question:"):
+                continue
+            if stripped.startswith("Modules used till now:"):
+                continue
+            if stripped.startswith("Python generator:"):
+                continue
+            if stripped.startswith("Solution:"):
+                continue
+
+            cleaned_lines.append(line)
+
+        program = "\n".join(cleaned_lines).strip()
+
+        if "import os" in program and "class solver" in program:
+            program = ""
         
-        elif self.python_model=='code_llama34b':   
-            program = get_codellama_response(self.python_tokenizer,self.python_pipeline,prompt=full_prompt,temperature=self.pg_temperature)
-        
-        elif self.python_model=='code_llama34b_pythonV1':   
-            program = get_codellama_response(self.python_tokenizer,self.python_pipeline,prompt=full_prompt,temperature=self.pg_temperature)
-        
-        elif self.python_model=='wizardcoder_34B':
-             program = get_wizard_coder_response(self.python_tokenizer,self.model_code,prompt=full_prompt,temperature=self.pg_temperature)
-        
-        
-        program= program.strip('"')
-        
-        # update the response cache
-        # update the cache
         self.cache["response"] = response
         self.cache["program"] = program
-
         self.cache["program_generator:input"] = test_prompt
         self.cache["program_generator:output"] = program
-        
+
         return test_prompt, program
     
 
@@ -1302,43 +1374,34 @@ class solver:
         self.cache["program_generator:output"] = program
         return test_prompt, program
 
-        
-   
     def program_executor(self):
-        
-        if "program" in self.cache:
-            program = self.cache["program"]
-        else:
-            return None, False
-        
-        # Get the response till now 
+        if "program" not in self.cache:
+            self.cache["program_executor:output"] = None
+            self.cache["program_executor:error"] = "No program found in cache"
+            return None, "Execution failed: No program found in cache"
+
+        program = self.cache["program"]
         response = self.cache["response"] if "response" in self.cache else ""
-        
-        # execute the module
+
         ans, error_message = safe_execute(program)
 
-        # update the response cache
-        if ans != "" and ans!= None:
+        # Store results
+        self.cache["program_executor:output"] = ans
+        self.cache["program_executor:error"] = error_message
+
+        if ans is not None and ans != "":
             response += f"\n\nPython generator:\n{program}"
             response += f"\n\nPython output:\n{ans}"
             response = response.strip()
-        
-        '''elif error_message!=None:
+            self.cache["response"] = response
+            return program, ans
 
-            if self.cache['refine']!='no':
-               # Refine the code using error message 
-               response += f"\n\nPython error message:\n{error_message}"
-               response = response.strip()
+        response += f"\n\nPython generator:\n{program}"
+        response += f"\n\nPython execution error:\n{error_message}"
+        response = response.strip()
+        self.cache["response"] = response
 
-               self.refine_python_code(program,error_message) 
-        '''       
-
-        # update the cache
-        self.cache['response'] = response 
-        self.cache["program_executor:output"] = ans
-
-        return program, ans
-    
+        return program, f"Execution failed: {error_message}"
 
     def solution_generator(self):
         # get the module input
@@ -1350,7 +1413,7 @@ class solver:
         elif self.model=='kr_walpha_sg' or  self.model=='sg' or self.model =="pg_sg" or self.model=='walpha_sg' or self.model=='walpha_pg_sg' or self.model == 'pg_walpha_sg' or self.model =='bing_walpha_sg' or self.model == 'walpha_bing_sg' or self.model =='bing_pg_walpha_sg' or self.model == 'kr_pg_sg' or self.model =='kr_sg' or self.model=='planner' or self.model == 'bing_sg' or self.model == 'bing_pg_sg' or self.model == 'pg_bing_sg':
             test_prompt, full_prompt = self.build_prompt_for_kr_walpha_sg()
 
-        
+    
         messages=[
             {"role": "user", "content": full_prompt},
         ]
@@ -1375,7 +1438,7 @@ class solver:
             else:
                 solution = get_chat_response(messages=messages, temperature=_temperature, max_tokens=self.sg_max_tokens)
 
-           
+            
             #pattern = re.compile(r"[Tt]he answer is ([A-Z])")      # "The answer is XXXXX.",
             #res = pattern.findall(solution)
             
@@ -1398,9 +1461,8 @@ class solver:
                     success=True        
 
             else:
-                if "boxed" in solution: # For MATH format
-                   success = True
-            
+                if solution and ("boxed" in solution or "The answer is" in solution): # For MATH format
+                    success = True
             
             count += 1
         
@@ -1411,8 +1473,8 @@ class solver:
         self.cache["solution_generator:input"] = test_prompt
         self.cache["solution_generator:output"] = solution
         return test_prompt, solution
-    
-    
+
+
     def bing_search(self):
         
         # Set up Bing credentials
@@ -1440,11 +1502,11 @@ class solver:
 
         # Use LLM to set up query based on question and context (response)
         if self.dataset == "AQUA":
-           demo_prompt = prompt_bing_query.prompt_AQUA
+            demo_prompt = prompt_bing_query.prompt_AQUA
         elif self.dataset == "MMLU":
-           demo_prompt = prompt_bing_query.prompt_MMLU
+            demo_prompt = prompt_bing_query.prompt_MMLU
         else:
-           demo_prompt = prompt_bing_query.prompt
+            demo_prompt = prompt_bing_query.prompt
         
         if response != "" and mods!="":
             test_prompt = f"Question:{question_text}\nModules used till now:[{mods}]\n{response}\nThought:"
@@ -1458,7 +1520,7 @@ class solver:
         ]
 
         # Query for Bing concept search using LLM-generated query
-       
+        
         num_tries = 3
         f = 0
         while(f<num_tries):
@@ -1470,7 +1532,7 @@ class solver:
             
             if query_output.find("Query:")!= -1:
                 break
-       
+        
         
         # Extract the queries and call api 
         query1= question_text  # Query for similar questions search is the input question
@@ -1513,23 +1575,23 @@ class solver:
             {"role": "user", "content": full_prompt_extract1},
         ]
 
-       
+        
         if self.bing_model == 'text_davinci_003':  # Check text-davinci-003
             info_bing1 = get_textdavinci003_response(full_prompt_extract1,temperature=0.5, max_tokens=500)
         else:
             info_bing1 = get_chat_response(messages1, temperature=0.5, max_tokens=500)
-       
+        
             
         messages2=[
             {"role": "user", "content": full_prompt_extract2},
         ]
 
-     
+        
         if self.bing_model == 'text_davinci_003': # Check text-davinci-003
             info_bing2 = get_textdavinci003_response(full_prompt_extract2,temperature=0.5, max_tokens=500)
         else:
             info_bing2 = get_chat_response(messages2, temperature=0.5, max_tokens=500)
-       
+        
         
         # Concatenate bing responses from query 'question' and 'query2' using context
         
@@ -1549,7 +1611,7 @@ class solver:
         self.cache["bing_search:output"] = info_bing
         return query_output, info_bing
 
-    
+
     def build_prompt_for_pot(self):
         
         question_text = self.get_question_text()
@@ -1560,9 +1622,9 @@ class solver:
 
         # build the prompt
         if self.dataset == "AQUA":
-           demo_prompt = prompt_pot.prompt_pot_AQUA.strip() 
+            demo_prompt = prompt_pot.prompt_pot_AQUA.strip() 
         else:   
-           demo_prompt = prompt_pot.prompt_pot.strip() 
+            demo_prompt = prompt_pot.prompt_pot.strip() 
         
         if response != "":
             test_prompt = f"Question: {question_text}\n\n{response}\n\nSolution: "
@@ -1571,8 +1633,8 @@ class solver:
         
         full_prompt = demo_prompt + "\n\n" + test_prompt # full prompt
         return test_prompt, full_prompt
-    
-    
+
+
     def build_prompt_for_kr_walpha_sg(self):
         
         question_text = self.get_question_text()
@@ -1597,7 +1659,7 @@ class solver:
             demo_prompt = prompt_walpha_kr_sg.prompt_GSM_new_walpha.strip()
 
         elif self.dataset == "GSM" and self.model == 'sg':
-             demo_prompt = prompt_walpha_kr_sg.prompt_GSM_new_sg.strip()
+                demo_prompt = prompt_walpha_kr_sg.prompt_GSM_new_sg.strip()
 
         elif self.dataset == "GSM" and self.model == 'pg_sg':
             demo_prompt = prompt_walpha_kr_sg.prompt_GSM_new.strip()
@@ -1637,49 +1699,66 @@ class solver:
         return test_prompt, full_prompt
 
 
-
-     
     def build_prompt_for_pg(self):
-        
         question = self.cache["example"]["problem"]
         response = self.cache["response"] if "response" in self.cache else ""
-        try:
-            ind = (self.modules).index('program_generator')
-        except:  
-            ind = (self.modules).index("python_generator_refine_executor")  
 
-        mods = (self.modules)[:ind]
-        mods = ' '.join(mods)
+        try:
+            ind = self.modules.index('program_generator')
+        except:
+            ind = self.modules.index("python_generator_refine_executor")
+
+        mods = self.modules[:ind]
+        mods = " ".join(mods)
+
         if self.extra_python_libraries == 'no':
             if self.dataset == "AQUA":
-              demo_prompt = prompt_pg.prompt_AQUA_new.strip()
+                demo_prompt = prompt_pg.prompt_AQUA_new.strip()
             elif self.dataset == "MMLU":
-              demo_prompt = prompt_pg.prompt_MMLU.strip()  
-            elif  self.dataset == "GSM":
-              demo_prompt = prompt_pg.prompt_GSM.strip() 
+                demo_prompt = prompt_pg.prompt_MMLU.strip()
+            elif self.dataset == "GSM":
+                demo_prompt = prompt_pg.prompt_GSM.strip()
             else:
-              demo_prompt = prompt_pg.prompt.strip()
-        
-        elif self.extra_python_libraries == 'yes':
-            if self.dataset == "AQUA":
-              demo_prompt = prompt_pg.prompt_AQUA.strip()
-            else:
-              demo_prompt = prompt_pg.prompt2.strip()
-
-        if self.extra_python_libraries=='no' and self.dataset=="MATH":
-            test_prompt = f"Question:{question}\nModules used till now:[{mods}]\n{response}\n\nPython generator:\n# Python Code, print answer. Also Output all the relevant objects in the intermediate steps of the python code. Make sure that the first line of the code is always 'from sympy import *'"
-        
-        elif self.extra_python_libraries=='no' and self.dataset=="GSM":
-            test_prompt = f"Question:{question}\nModules used till now:[{mods}]\n{response}\n\nPython generator:\n# Python Code, print answer. Also Output all the relevant objects in the intermediate steps of the python code."
-
+                demo_prompt = prompt_pg.prompt.strip()
         else:
-            test_prompt = f"Question:{question}\nModules used till now:[{mods}]\n{response}\nPython generator:\n# Python Code, print answer. Also Output all the relevant objects in the intermediate steps of the python code."
+            if self.dataset == "AQUA":
+                demo_prompt = prompt_pg.prompt_AQUA.strip()
+            else:
+                demo_prompt = prompt_pg.prompt2.strip()
+
+        python_rules = """
+            Python generator:
+            # Write ONLY executable Python code.
+            # Do not include any explanation, markdown, or code fences.
+            # The first line must be exactly: from sympy import *
+            # Rules:
+            # 1. Always define every symbol before using it, for example: x = symbols('x')
+            # 2. Never hardcode the final answer unless it was derived in code.
+            # 3. Prefer direct arithmetic/combinatorics/algebra over overly symbolic approaches when possible.
+            # 4. Do not use solve() for domain/interval logic unless necessary.
+            # 5. Do not sort symbolic expressions.
+            # 6. Print the final answer clearly.
+            # 7. Print useful intermediate values only if they help verify correctness.
+            # 8. The code must run as-is with no placeholders.
+            """
+
+        if self.dataset == "MATH":
+            python_rules += "# For domain questions, use Interval / Union / intersection logic explicitly.\n"
+            python_rules += "# For polynomial remainder questions, define the variable symbols before using div().\n"
+            python_rules += "# For geometry, prefer determinant/coordinate formulas over comparing symbolic side lengths.\n"
+
+        test_prompt = (
+            f"Question: {question}\n"
+            f"Modules used till now: [{mods}]\n"
+            f"{response}\n\n"
+            f"{python_rules}\n"
+            "Code:\n"
+        )
 
         full_prompt = demo_prompt + "\n\n" + test_prompt
         return test_prompt, full_prompt
 
 
-    
     def build_prompt_for_kr_pg(self):
         
         question_text = self.get_question_text()
@@ -1708,9 +1787,9 @@ class solver:
 
         # build the prompt
         if self.dataset == "AQUA":
-           demo_prompt = prompt_kr_pg_sg.prompt_AQUA.strip()
+            demo_prompt = prompt_kr_pg_sg.prompt_AQUA.strip()
         else:   
-           demo_prompt = prompt_kr_pg_sg.prompt.strip() # WARNING: this is the prompt for kr_sg
+            demo_prompt = prompt_kr_pg_sg.prompt.strip() # WARNING: this is the prompt for kr_sg
         
         if response != "":
             test_prompt = f"Question: {question_text}\n\n{response}\n\nSolution: "
@@ -1720,7 +1799,7 @@ class solver:
         full_prompt = demo_prompt + "\n\n" + test_prompt # full prompt
 
         return test_prompt, full_prompt
-    
+
 
     def build_prompt_for_sg_cot(self):
 
@@ -1739,10 +1818,4 @@ class solver:
         full_prompt = demo_prompt + "\n\n" + test_prompt # full prompt
 
         return test_prompt, full_prompt
-
-
-
-
-
-
 

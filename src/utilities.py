@@ -1,66 +1,68 @@
+import os
 import time
-import random
-import openai
-import func_timeout
-import requests
-import numpy as np
-import os 
-import langchain 
-
 import logging
-logging.basicConfig(format='%(asctime)s %(message)s', datefmt='%m/%d/%Y %I:%M:%S %p', level=logging.INFO)
-
-from typing import Union, Any
+import codecs
+from io import StringIO
+from contextlib import redirect_stdout
 from math import isclose
+from typing import Any, Optional
 
-from dotenv import load_dotenv
-load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
-
-from langchain.schema import (
-    AIMessage,
-    HumanMessage,
-    SystemMessage
-)
-
-
-
+import matplotlib
+import requests
 import google.generativeai as genai
-# logger = logging.getLogger(__name__)
+from dotenv import load_dotenv
+from openai import AzureOpenAI
 
-
-
-from langchain.chains import LLMChain
-
-# Langchain
-from langchain.chat_models import AzureChatOpenAI
-from langchain.prompts.chat import (
-    ChatPromptTemplate,
-    SystemMessagePromptTemplate,
-    HumanMessagePromptTemplate,
+logging.basicConfig(
+    format="%(asctime)s %(message)s",
+    datefmt="%m/%d/%Y %I:%M:%S %p",
+    level=logging.INFO,
 )
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+ENV_PATH = os.path.join(BASE_DIR, ".env")
+load_dotenv(ENV_PATH)
 
-openai.api_type =  "azure"
-openai.api_base = os.environ['OPENAI_API_BASE']
-openai.api_version = os.environ['OPENAI_API_VERSION']
-openai.api_key = os.environ['OPENAI_API_KEY']
-openai.deployment_name = os.environ["OPENAI_DEPLOYMENT_NAME"]
-openai.model_name = os.environ['MODEL_NAME']
-
-# Set up Google API Key
-genai.configure(api_key=os.environ["GOOGLE_API_KEY"])
+matplotlib.use("Agg")
 
 
-# Initiate a connection to the LLM from Azure OpenAI Service via LangChain.
-llm = AzureChatOpenAI(
-    openai_api_key=openai.api_key,
-    deployment_name=openai.deployment_name ,
-    openai_api_version = openai.api_version,
-    openai_api_base = openai.api_base ,
-    model_name = openai.model_name, 
-    temperature=0.5
+def _get_env(name: str, default: Optional[str] = None, required: bool = False) -> Optional[str]:
+    value = os.getenv(name, default)
+    if required and (value is None or str(value).strip() == ""):
+        raise RuntimeError(f"Missing required environment variable: {name}")
+    return value
+
+
+AZURE_ENDPOINT = _get_env("OPENAI_API_BASE", required=True)
+AZURE_API_KEY = _get_env("OPENAI_API_KEY", required=True)
+AZURE_API_VERSION = _get_env("OPENAI_API_VERSION", required=True)
+AZURE_DEPLOYMENT_NAME = _get_env("OPENAI_DEPLOYMENT_NAME", required=True)
+MODEL_NAME = _get_env("MODEL_NAME", default=AZURE_DEPLOYMENT_NAME)
+
+client = AzureOpenAI(
+    api_key=AZURE_API_KEY,
+    api_version=AZURE_API_VERSION,
+    azure_endpoint=AZURE_ENDPOINT,
 )
 
+GOOGLE_API_KEY = _get_env("GOOGLE_API_KEY")
+if GOOGLE_API_KEY:
+    genai.configure(api_key=GOOGLE_API_KEY)
+
+
+def _normalize_code_block(code_string: str) -> str:
+    new_code_string = codecs.decode(code_string, "unicode_escape")
+    new_code_string = new_code_string.strip()
+
+    if new_code_string.startswith("```python"):
+        new_code_string = new_code_string[len("```python"):].strip()
+    elif new_code_string.startswith("```"):
+        new_code_string = new_code_string[len("```"):].strip()
+
+    if new_code_string.endswith("```"):
+        new_code_string = new_code_string[:-3].strip()
+
+    return new_code_string
 
 def safe_execute(code_string: str, keys=None):
     import codecs
@@ -68,298 +70,263 @@ def safe_execute(code_string: str, keys=None):
     from contextlib import redirect_stdout
     import matplotlib
     matplotlib.use('Agg')
-    import func_timeout
 
     new_code_string = codecs.decode(code_string, 'unicode_escape')
-
-    # 🔥 remove markdown fences if present
     new_code_string = new_code_string.strip()
+
     if new_code_string.startswith("```python"):
         new_code_string = new_code_string[len("```python"):].strip()
-    if new_code_string.startswith("```"):
+    elif new_code_string.startswith("```"):
         new_code_string = new_code_string[len("```"):].strip()
+
     if new_code_string.endswith("```"):
         new_code_string = new_code_string[:-3].strip()
 
     output = None
     error_message = None
 
-    def _run_code():
-        buffer = StringIO()
-        with redirect_stdout(buffer):
-            exec(new_code_string, globals())
-        return buffer.getvalue()
-
     try:
-        output = func_timeout.func_timeout(10, _run_code)
-    except func_timeout.FunctionTimedOut:
-        error_message = "TLE"
+        buffer = StringIO()
+        exec_globals = {"__name__": "__main__"}
+        with redirect_stdout(buffer):
+            exec(new_code_string, exec_globals)
+        output = buffer.getvalue()
     except Exception as e:
         error_message = str(e)
 
     return output, error_message
 
-
-def get_llama_response(tokenizer,pipeline,prompt,temperature=0.5):
-    
-    system = "Follow the format of the examples given below"
-
-    # Prompt in CodeLlama format
-    #prompt = f"<s>[INST] <<SYS>>\\n{system}\\n<</SYS>>\\n\\n{prompt}[/INST]"
-    
-    #prompt = f"<s>[INST] <<SYS>>\n{system}\n<</SYS>>\n{prompt} [/INST]"
-
+def get_llama_response(tokenizer, pipeline, prompt, temperature=0.5):
     prompt = f"<s>[INST] {prompt.strip()} [/INST]"
-    
- 
+
     sequences = pipeline(
-    prompt,
-    do_sample=True,
-    top_k=10,
-    temperature=temperature,
-    top_p=0.5,
-    num_return_sequences=1,
-    eos_token_id=tokenizer.eos_token_id,
-    max_new_tokens=300,
-    return_full_text=False
+        prompt,
+        do_sample=True,
+        top_k=10,
+        temperature=temperature,
+        top_p=0.5,
+        num_return_sequences=1,
+        eos_token_id=tokenizer.eos_token_id,
+        max_new_tokens=300,
+        return_full_text=False,
     )
-    
-    response = ""
 
-    for seq in sequences:
-        response = response + (seq['generated_text'])
-    
-    # Remove the part after the first word "Question"
+    response = "".join(seq["generated_text"] for seq in sequences)
     index = response.find("Question")
-
-    if index !=-1:
+    if index != -1:
         response = response[:index]
 
-    return response   
+    return response.strip()
 
-def get_llama_13bresponse(tokenizer,pipeline,prompt,temperature=0.5):
-    system = "Follow the format of the examples given below"
 
-    # Prompt in CodeLlama format
-    #prompt = f"<s>[INST] <<SYS>>\\n{system}\\n<</SYS>>\\n\\n{prompt}[/INST]"
-    
-    #prompt = f"<s>[INST] <<SYS>>\n{system}\n<</SYS>>\n{prompt} [/INST]"
-
-    #prompt = f"<s>[INST] {prompt.strip()} [/INST]"
-    
- 
+def get_llama_13bresponse(tokenizer, pipeline, prompt, temperature=0.5):
     sequences = pipeline(
-    prompt,
-    do_sample=True,
-    top_k=10,
-    temperature=temperature,
-    top_p=0.5,
-    num_return_sequences=1,
-    eos_token_id=tokenizer.eos_token_id,
-    max_new_tokens=300,
-    return_full_text=False
+        prompt,
+        do_sample=True,
+        top_k=10,
+        temperature=temperature,
+        top_p=0.5,
+        num_return_sequences=1,
+        eos_token_id=tokenizer.eos_token_id,
+        max_new_tokens=300,
+        return_full_text=False,
     )
-    
-    response = ""
 
-    for seq in sequences:
-        response = response + (seq['generated_text'])
-    
-    # Remove the part after the first word "Question"
+    response = "".join(seq["generated_text"] for seq in sequences)
     index = response.find("Question")
-
-    if index !=-1:
+    if index != -1:
         response = response[:index]
 
-    return response   
+    return response.strip()
+
+
+def _sleep_if_needed(sleep_time: float) -> None:
+    if sleep_time and sleep_time > 0:
+        logging.info("---------Sleep starts----------")
+        time.sleep(sleep_time)
+        logging.info("---------Sleep ends----------")
 
 
 def get_textdavinci002_response(prompt, temperature, max_tokens, n=1, patience=1, sleep_time=2):
-   
+    deployment = _get_env("OPENAI_TEXTDAVC002_DEPLOYMENT_NAME", required=True)
+    last_error = None
+
     while patience > 0:
         patience -= 1
         try:
-            response = openai.Completion.create(engine=os.environ['OPENAI_TEXTDAVC002_DEPLOYMENT_NAME'],
-                                                prompt=prompt,
-                                                api_key=openai.api_key,
-                                                temperature=temperature,
-                                                max_tokens=500,
-                                                top_p=0.5,
-                                                best_of=1,
-                                                stop=["Question"],
-                                                frequency_penalty=0,
-                                                presence_penalty=0)
-            prediction = response["choices"][0]["text"].strip()
-            if prediction != "" and prediction != None:
-                time.sleep(sleep_time)
+            response = client.completions.create(
+                model=deployment,
+                prompt=prompt,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                top_p=0.5,
+            )
+            prediction = response.choices[0].text.strip()
+            if prediction:
+                _sleep_if_needed(sleep_time)
                 return prediction
         except Exception as e:
-            logging.info(f"{e}")
-            if sleep_time > 0:
-                time.sleep(sleep_time)
-    
-    return ""
-    
+            last_error = e
+            logging.exception("text-davinci-002 call failed: %s", e)
+            _sleep_if_needed(sleep_time)
+
+    raise RuntimeError(f"text-davinci-002 call failed after retries: {last_error}")
+
+
 def get_textdavinci003_response(prompt, temperature, max_tokens, n=1, patience=1, sleep_time=2):
-   
-    logging.info(f"-------Text davinci 003 response------")
+    deployment = _get_env("OPENAI_TEXTDAVC003_DEPLOYMENT_NAME", required=True)
+    last_error = None
+
+    logging.info("-------Text davinci 003 response------")
     while patience > 0:
         patience -= 1
         try:
-            response = openai.Completion.create(engine=os.environ['OPENAI_TEXTDAVC003_DEPLOYMENT_NAME'],
-                                                prompt=prompt,
-                                                api_key=openai.api_key,
-                                                temperature=temperature,
-                                                max_tokens=500,
-                                                top_p=0.5,
-                                                best_of=1,
-                                                stop=["Question"],
-                                                frequency_penalty=0,
-                                                presence_penalty=0)
-            
-            prediction = response["choices"][0]["text"].strip()
-            if prediction != "" and prediction != None:
-                logging.info(f"-----Sleep starts---")
-                time.sleep(sleep_time)
-                logging.info(f"-----Sleep ends---")
+            response = client.completions.create(
+                model=deployment,
+                prompt=prompt,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                top_p=0.5,
+            )
+            prediction = response.choices[0].text.strip()
+            if prediction:
+                _sleep_if_needed(sleep_time)
                 return prediction
         except Exception as e:
-            logging.info(f"{e}")
-            if sleep_time > 0:
-                time.sleep(sleep_time)
-    
-    return ""
+            last_error = e
+            logging.exception("text-davinci-003 call failed: %s", e)
+            _sleep_if_needed(sleep_time)
+
+    raise RuntimeError(f"text-davinci-003 call failed after retries: {last_error}")
 
 
+def get_gpt3_response(
+    prompt,
+    api_key,
+    engine="text-davinci-002",
+    temperature=0,
+    max_tokens=256,
+    top_p=1,
+    n=1,
+    patience=100,
+    sleep_time=0,
+):
+    last_error = None
 
-def get_gpt3_response(prompt, api_key, engine="text-davinci-002", temperature=0, max_tokens=256, top_p=1, n=1, patience=100, sleep_time=0):
     while patience > 0:
         patience -= 1
         try:
-            response = openai.Completion.create(engine=engine,
-                                                prompt=prompt,
-                                                api_key=api_key,
-                                                temperature=temperature,
-                                                max_tokens=max_tokens,
-                                                top_p=top_p,
-                                                n=n,
-                                                stop=['\n\n'],
-                                                frequency_penalty=0,
-                                                presence_penalty=0)
-            prediction = response["choices"][0]["text"].strip()
-            if prediction != "" and prediction != None:
+            response = client.completions.create(
+                model=engine,
+                prompt=prompt,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                top_p=top_p,
+            )
+            prediction = response.choices[0].text.strip()
+            if prediction:
                 return prediction
         except Exception as e:
-            logging.info(f"{e}")
-            if sleep_time > 0:
-                time.sleep(sleep_time)
-    return ""
+            last_error = e
+            logging.exception("GPT3 completion failed: %s", e)
+            _sleep_if_needed(sleep_time)
+
+    raise RuntimeError(f"GPT3 completion failed after retries: {last_error}")
 
 
-def get_chat_response_code(context, temperature=0.5, max_tokens=256, system_mess=None,stop=None,n=1, patience=10, sleep_time=5):
-    
-    from langchain.schema.messages import HumanMessage, SystemMessage
-    import time
-    logging.info(f"----Response starts-----")
-    
+def _chat_completion(messages, temperature=0.0, max_tokens=256, stop=None):
+    kwargs = {
+        "model": AZURE_DEPLOYMENT_NAME,
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+    }
+    if stop is not None:
+        kwargs["stop"] = stop
+
+    response = client.chat.completions.create(**kwargs)
+    return response.choices[0].message.content.strip()
+
+
+def get_chat_response_code(
+    context,
+    temperature=0.5,
+    max_tokens=256,
+    system_mess=None,
+    stop=None,
+    n=1,
+    patience=10,
+    sleep_time=5,
+):
+    logging.info("----Response starts-----")
+
+    messages = []
     if system_mess is not None:
+        messages.append({"role": "system", "content": system_mess})
+    messages.append({"role": "user", "content": context})
+
+    last_error = None
+    while patience > 0:
+        patience -= 1
         try:
-            if stop!=None:
-                response = llm([SystemMessage(content=system_mess),HumanMessage(content=context)],max_tokens=max_tokens,temperature=temperature,stop=stop)
-            else:
-                response = llm([SystemMessage(content=system_mess),HumanMessage(content=context)],max_tokens=max_tokens,temperature=temperature)
-        except:
-            response = ""
-    else:
-        try:
-            if stop!=None:
-                response = llm([HumanMessage(content=context)],max_tokens=max_tokens,temperature=temperature,stop=stop)
-            else:
-                response = llm([HumanMessage(content=context)],max_tokens=max_tokens,temperature=temperature)
-        except:
-            response = ""
-    logging.info(f"----Response ends-----")
-    
-    try:
-      logging.info(f"---------Sleep starts----------")
-      time.sleep(sleep_time)
-      logging.info(f"---------Sleep ends----------")
-      return response.content
-    except:
-      logging.info(f"---------Sleep starts----------")
-      time.sleep(sleep_time)
-      logging.info(f"---------Sleep ends----------")
-      return ""
+            response_text = _chat_completion(
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                stop=stop,
+            )
+            logging.info("----Response ends-----")
+            _sleep_if_needed(sleep_time)
+            return response_text
+        except Exception as e:
+            last_error = e
+            logging.exception("Azure chat code call failed: %s", e)
+            _sleep_if_needed(sleep_time)
+
+    raise RuntimeError(f"Azure chat code call failed after retries: {last_error}")
 
 
 def get_gemini_response(full_prompt):
-    
-    flag=0
-    while(flag==0):
-        gemini_model = genai.GenerativeModel('gemini-pro')
+    if not GOOGLE_API_KEY:
+        raise RuntimeError("GOOGLE_API_KEY is missing from .env")
+
+    while True:
+        gemini_model = genai.GenerativeModel("gemini-pro")
         response = gemini_model.generate_content(full_prompt)
-        
-        try :
-           return response.text
-        except:
-           try:
-            return response.candidates[0].content.parts[0].text 
-           except:
-            continue 
-    
-   
+
+        try:
+            return response.text
+        except Exception:
+            try:
+                return response.candidates[0].content.parts[0].text
+            except Exception:
+                continue
+
 
 def get_chat_response(messages, temperature=0, max_tokens=256, n=1, patience=1, sleep_time=2):
-    
-    import time
-    
-    # Context
-    context = (messages[0]["content"])
-    logging.info(f"CHATGPT CALLED")
-    logging.info(f"----Response starts-----")
+    logging.info("CHATGPT CALLED")
+    logging.info("----Response starts-----")
 
-    try:
-        response = llm([HumanMessage(content=context)],max_tokens=max_tokens,temperature=temperature)
+    last_error = None
+    while patience > 0:
+        patience -= 1
+        try:
+            response_text = _chat_completion(
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+            logging.info("----Response ends-----")
+            _sleep_if_needed(sleep_time)
+            return response_text
+        except Exception as e:
+            last_error = e
+            logging.exception("Azure chat call failed: %s", e)
+            _sleep_if_needed(sleep_time)
 
-    except:
-        response = ""
-    
-    logging.info(f"----Response ends-----")
+    raise RuntimeError(f"Azure chat call failed after retries: {last_error}")
 
-    try:
-      logging.info(f"---------Sleep starts----------")
-      time.sleep(sleep_time)
-      logging.info(f"---------Sleep ends----------")
-      #logging.info(f"{response.content}")
-      return response.content
-    
-    except:
-      logging.info(f"---------Sleep starts----------")
-      time.sleep(sleep_time)
-      logging.info(f"---------Sleep ends----------")
-      return ""        
-    
-    '''
-    try:
-            
-                response = openai.ChatCompletion.create(
-                    engine=engine,
-                    #model=self.model_name,
-                    messages=messages,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    api_key=api_key,
-                )
-                gen = response['choices'][0]['message']['content']
-                return gen
 
-    except:
-          logging.info(f"Does not work")
-          return ""
-    '''
-       
-
-# Helper functions 
 def floatify_ans(ans):
     if ans is None:
         return None
@@ -393,77 +360,63 @@ def score_string_similarity(str1, str2):
         return len(overlap) / max(len(str1_split), len(str2_split))
     else:
         return 0.0
-        
 
 
 def _validate_server(address):
     if not address:
-        raise ValueError('Must provide a valid server for search')
-    if address.startswith('http://') or address.startswith('https://'):
+        raise ValueError("Must provide a valid server for search")
+    if address.startswith("http://") or address.startswith("https://"):
         return address
-    PROTOCOL = 'http://'
-    logging.info(f'No protocol provided, using "{PROTOCOL}"')
-    return f'{PROTOCOL}{address}'
+    protocol = "http://"
+    logging.info(f'No protocol provided, using "{protocol}"')
+    return f"{protocol}{address}"
+
 
 def call_bing_search(endpoint, bing_api_key, query, count):
-    
-    headers = {'Ocp-Apim-Subscription-Key': bing_api_key}
-    params = {"q": query, "textDecorations": True,
-      "textFormat": "HTML", "count": count}
-    
+    headers = {"Ocp-Apim-Subscription-Key": bing_api_key}
+    params = {
+        "q": query,
+        "textDecorations": True,
+        "textFormat": "HTML",
+        "count": count,
+    }
+
     try:
-        response = requests.get(endpoint, headers=headers, params=params)
-        logging.info(f"BING CALLED")
-        #response.raise_for_status()
-        resp_status = response.status_code
-        
-        if resp_status == 200:
-            result = response.json()
-            return result 
-    except:
-        pass
-        
+        response = requests.get(endpoint, headers=headers, params=params, timeout=30)
+        logging.info("BING CALLED")
+        if response.status_code == 200:
+            return response.json()
+        logging.warning("Bing search failed with status %s: %s", response.status_code, response.text)
+    except Exception as e:
+        logging.exception("Bing search request failed: %s", e)
+
     return None
+
 
 def parse_bing_result(result):
     responses = []
     try:
         value = result["webPages"]["value"]
-    except:
+    except Exception:
         return responses
-    
+
     try:
-        for i in range(len(value)):
-            snippet = value[i]['snippet'] if 'snippet' in value[i] else ""
+        for item in value:
+            snippet = item["snippet"] if "snippet" in item else ""
             snippet = snippet.replace("<b>", "").replace("</b>", "").strip()
             if snippet != "":
                 responses.append(snippet)
         return responses
+    except Exception:
+        return []
 
-    except:
-        return []    
 
-
-        
 def get_webpage_content():
-       
-        from bs4 import BeautifulSoup
-        import requests
+    from bs4 import BeautifulSoup
 
-        url = "https://en.wikipedia.org/wiki/Ryan_Gosling"  # replace with your URL
-        response = requests.get(url)
-        soup = BeautifulSoup(response.text, 'html.parser')
-
-        # Get all the text in the webpage
-        text = soup.get_text()
-        #logging.info(f"{text}")
-        # Split the text by line
-        lines = text.splitlines()
-        logging.info(f"{lines[1000:]}")
-
-        # Get the first few lines
-        #first_few_lines = lines[:20]  # replace 5 with the number of lines you want
-
-        #logging.info(f"{'\n'.join(first_few_lines)}")
-    
-        
+    url = "https://en.wikipedia.org/wiki/Ryan_Gosling"
+    response = requests.get(url, timeout=30)
+    soup = BeautifulSoup(response.text, "html.parser")
+    text = soup.get_text()
+    lines = text.splitlines()
+    logging.info("%s", lines[1000:])

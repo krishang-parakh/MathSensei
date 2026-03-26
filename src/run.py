@@ -58,30 +58,30 @@ def parse_args():
     
     # module prediction
     parser.add_argument('--modules', nargs='+', default=None, help='default modules')
-    parser.add_argument('--policy_engine', type=str, default="gpt-3.5-turbo", help='engine for module prediction')
+    parser.add_argument('--policy_engine', type=str, default="gpt4o", help='engine for module prediction')
     parser.add_argument('--policy_temperature', type=float, default=0, help='temperature for module prediction')
-    parser.add_argument('--policy_max_tokens', type=int, default=128, help='max tokens for module prediction')
+    parser.add_argument('--policy_max_tokens', type=int, default=1000, help='max tokens for module prediction')
     
     # program generation
-    parser.add_argument('--pg_engine', type=str, default="gpt-3.5-turbo", help='engine for program generation')
+    parser.add_argument('--pg_engine', type=str, default="gpt4o", help='engine for program generation')
     parser.add_argument('--pg_temperature', type=float, default=0.5, help='temperature for program generation')
-    parser.add_argument('--pg_max_tokens', type=int, default=150, help='max tokens for program generation')
+    parser.add_argument('--pg_max_tokens', type=int, default=1500, help='max tokens for program generation')
     
     # knowledge retrieval
-    parser.add_argument('--kr_engine', type=str, default="gpt-3.5-turbo", help='engine for knowledge retrieval')
+    parser.add_argument('--kr_engine', type=str, default="gpt4o", help='engine for knowledge retrieval')
     parser.add_argument('--kr_temperature', type=float, default=0.5, help='temperature for knowledge retrieval')
-    parser.add_argument('--kr_max_tokens', type=int, default=512, help='max tokens for knowledge retrieval')
+    parser.add_argument('--kr_max_tokens', type=int, default=1000, help='max tokens for knowledge retrieval')
    
     # query generator
-    parser.add_argument('--qg_engine', type=str, default="gpt-3.5-turbo", help='engine for query generator')
+    parser.add_argument('--qg_engine', type=str, default="gpt4o", help='engine for query generator')
     parser.add_argument('--qg_temperature', type=float, default=0., help='temperature for query generator')
-    parser.add_argument('--qg_max_tokens', type=int, default=64, help='max tokens for query generator')
+    parser.add_argument('--qg_max_tokens', type=int, default=1000, help='max tokens for query generator')
     parser.add_argument('--qg_patience', type=int, default=5, help='patience for query generator')
 
     # solution_generator
-    parser.add_argument('--sg_engine', type=str, default="gpt-3.5-turbo", help='engine for solution generator')
+    parser.add_argument('--sg_engine', type=str, default="gpt4o", help='engine for solution generator')
     parser.add_argument('--sg_temperature', type=float, default=0.5, help='temperature for solution generator')
-    parser.add_argument('--sg_max_tokens', type=int, default=300, help='max tokens for solution generator')
+    parser.add_argument('--sg_max_tokens', type=int, default=3000, help='max tokens for solution generator')
     parser.add_argument('--sg_patience', type=int, default=2, help='patience for solution generator')
     
     
