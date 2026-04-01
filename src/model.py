@@ -1264,6 +1264,7 @@ class solver:
         (3) Use of classes or methods without properly importing required libraries like Sympy, math, etc.
         (4) Wrong way of handling mathematical objects specially in the Sympy library, use of invalid operators with class objects.
         (5) Code has an abrupt end, or code contains natural language sentences instead of python syntax.
+        (6) Wrong assumptions about the shape of Sympy solve() output. If the code indexes solve(...) with a Symbol, use dict=True and access the first dict, or use integer indexing if solve() returns a list.
         """
         
         code_fixer_response = get_chat_response_code(full_prompt,temperature = 0.7, max_tokens=5000,system_mess=system_message)
@@ -1384,6 +1385,31 @@ class solver:
         response = self.cache["response"] if "response" in self.cache else ""
 
         ans, error_message = safe_execute(program)
+
+        # Common SymPy failure mode: solve() returned a list/tuple, but the code indexes it with a Symbol.
+        # Try one repair pass using the existing code-fixer so the run can recover automatically.
+        if (
+            error_message is not None
+            and "list indices must be integers or slices, not Symbol" in error_message
+        ):
+            repaired_program, errors_fixed = self.code_fixer(program, error_message)
+            repaired_program = repaired_program.strip() if repaired_program else ""
+
+            if repaired_program and repaired_program != program:
+                repaired_ans, repaired_error = safe_execute(repaired_program)
+                self.cache["program_repair"] = {
+                    "trigger_error": error_message,
+                    "errors_fixed": errors_fixed,
+                    "repaired_program": repaired_program,
+                    "repaired_output": repaired_ans,
+                    "repaired_error": repaired_error,
+                }
+
+                if repaired_error is None and repaired_ans is not None and repaired_ans != "":
+                    program = repaired_program
+                    ans = repaired_ans
+                    error_message = None
+                    self.cache["program"] = repaired_program
 
         # Store results
         self.cache["program_executor:output"] = ans
@@ -1740,6 +1766,9 @@ class solver:
             # 6. Print the final answer clearly.
             # 7. Print useful intermediate values only if they help verify correctness.
             # 8. The code must run as-is with no placeholders.
+            # 9. Be careful with SymPy solve(): for one variable, solve(...) usually returns a list, so use sol[0].
+            # 10. For systems of equations, use solve(..., dict=True), then access the first dict like solutions[0][x].
+            # 11. Never index a plain solve() list with a Symbol like solution[x] unless you explicitly requested dict=True.
             """
 
         if self.dataset == "MATH":

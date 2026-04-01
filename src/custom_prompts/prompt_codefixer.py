@@ -106,4 +106,26 @@ print("Sum:", sum)
 Errors fixed:
 Fixed the incorrect way of extracting numerator and denominator from 'Mul' object.
 
+
+
+Incorrect Python code:
+from sympy import *
+x, y = symbols('x y')
+eq1 = Eq(x + y, 10)
+eq2 = Eq(x - y, 4)
+solution = solve((eq1, eq2), (x, y))
+print(solution[x], solution[y])
+Error message: list indices must be integers or slices, not Symbol
+Corrected Python Code:
+from sympy import *
+x, y = symbols('x y')
+eq1 = Eq(x + y, 10)
+eq2 = Eq(x - y, 4)
+solutions = solve((eq1, eq2), (x, y), dict=True)
+solution = solutions[0]
+print(solution[x], solution[y])
+Errors fixed:
+Changed solve() to return dictionaries by using dict=True.
+Fixed the incorrect use of Symbol-based indexing on a plain list result.
+
 """

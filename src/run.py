@@ -3,33 +3,22 @@ import sys
 import json
 import argparse
 import random
-from tqdm import tqdm
-import sys
 
 # add the parent directory to the path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))) 
 
+from console_ui import (
+    print_module_plan,
+    print_module_result,
+    print_problem_header,
+    print_problem_summary,
+    print_run_header,
+    print_run_summary,
+    print_warning,
+)
 from utilities import *
 from model import solver
-
-def build_readable_record(cache):
-    example = cache.get("example", {})
-
-    return {
-        "pid": cache.get("pid"),
-        "problem": example.get("problem"),
-        "problem_type": example.get("type") or example.get("subject"),
-        "level": example.get("level"),
-        "ground_truth_solution": example.get("solution"),
-        "generated_program": cache.get("program"),
-        "program_output": cache.get("program_executor:output"),
-        "program_error": cache.get("program_executor:error"),
-        "wolfram_query": cache.get("wolfram_alpha_search:input"),
-        "wolfram_output": cache.get("wolfram_alpha_search:output"),
-        "final_generated_solution": cache.get("solution"),
-        "final_answer": cache.get("answer"),
-        "modules_used": cache.get("modules"),
-    }
+from reporting import generate_report, normalize_record
 
 def parse_args():
 
@@ -116,9 +105,10 @@ if __name__ == "__main__":
     cache_file = f"{result_root}/{args.label}_{args.test_split}_cache.json"
     cache_jsonl = f"{result_root}/{args.label}_{args.test_split}_cache.jsonl"
     result_file = f"{result_root}/{args.label}_{args.test_split}.json"
+    readable_jsonl = f"{result_root}/{args.label}_{args.test_split}_readable.jsonl"
+    report_file = f"{result_root}/{args.label}_{args.test_split}_report.html"
     
-    # Result file
-    print("Result file :", result_file)
+    print_run_header(args, result_file, solver.test_number)
     
     # Running in error model 
     if args.error_mode != 'no':  
@@ -241,7 +231,11 @@ if __name__ == "__main__":
 
                                         
     # If error_mode is "no" (Default run)           
-    for pid in tqdm(range(solver.current_index,solver.test_number)):
+    complete_count = 0
+    partial_count = 0
+    needs_review_count = 0
+
+    for pid in range(solver.current_index, solver.test_number):
 
  
         solver.cache = {"pid": pid}      # clear the cache
@@ -278,11 +272,10 @@ if __name__ == "__main__":
             or solver.cache["example"].get("Question")
             or str(solver.cache["example"])
         )
-        print(f"\n[Problem {pid}] {problem_preview[:140]}...")
+        print_problem_header(pid, solver.test_number, problem_preview)
         
         if args.modules is not None:
             modules = args.modules
-            print(f"# [Modules]\n{modules}\n")
         else:
             if args.model == 'cot' or  args.model =='sg':
                 modules = ["solution_generator"]
@@ -340,17 +333,20 @@ if __name__ == "__main__":
             elif  args.model == 'planner':
               modules = solver.predict_modules()
         
-        solver.modules = solver.modules + modules
-        modules = [f"solver.{module}" for module in modules]
+        module_names = list(modules)
+        print_module_plan(module_names)
+        solver.modules = solver.modules + module_names
+        module_calls = [f"solver.{module}" for module in module_names]
         
        
             
         # [2] Execute the modules 
         if args.debug:
-            print(f"# [Modules]\n{modules}\n")
+            print(f"# [Modules]\n{module_calls}\n")
             
-        for module in modules:
+        for module_name, module in zip(module_names, module_calls):
             input, output = eval(module)()     # eval the module and update the cache
+            print_module_result(module_name, input, output)
             if args.debug:
                 print(f"======== [Module]: {module} ========\n")
                 print(f"# [Input]\n{input}\n")
@@ -370,18 +366,40 @@ if __name__ == "__main__":
                 json.dump(solver.cache, f)
                 f.write('\n')
             except Exception as e:
-                print(e)
-                print(solver.cache)
+                print_warning(str(e))
 
-        readable_jsonl = f"{result_root}/{args.label}_{args.test_split}_readable.jsonl"
+        normalized_record = normalize_record(solver.cache)
         with open(readable_jsonl, "a", encoding="utf-8") as f:
             try:
-                json.dump(build_readable_record(solver.cache), f, ensure_ascii=False)
+                json.dump(normalized_record, f, ensure_ascii=False)
                 f.write("\n")
             except Exception as e:
-                print(e)
+                print_warning(str(e))
 
+        if normalized_record["status"] == "complete":
+            complete_count += 1
+        elif normalized_record["status"] == "needs-review":
+            needs_review_count += 1
+        else:
+            partial_count += 1
 
+        print_problem_summary(solver.cache)
+
+    try:
+        generate_report(
+            readable_jsonl,
+            output_path=report_file,
+            title=f"MathSensei ({args.dataset})",
+        )
+    except Exception as e:
+        print_warning(f"Failed to generate HTML report: {e}")
+
+    print_run_summary(
+        solver.test_number,
+        complete_count + partial_count,
+        needs_review_count,
+        report_file,
+    )
 
 
         

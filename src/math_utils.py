@@ -293,16 +293,23 @@ def _clean_numbers(string):
 
 def read_jsonl_file(file_path):
     data = []
-    count = 0
-    with open(file_path, 'r') as file:
-        for line in file:
-            try:
-                record = json.loads(line)
-            except:
-                record = {}  
-                #logging.info(f"hjwhufhwufh")  
-            data.append(record)
-            count+=1
+    last_error = None
+    for encoding in ("utf-8-sig", "utf-8", "cp1252"):
+        try:
+            with open(file_path, "r", encoding=encoding) as file:
+                for line in file:
+                    try:
+                        record = json.loads(line)
+                    except:
+                        record = {}
+                    data.append(record)
+            return data
+        except UnicodeDecodeError as exc:
+            data = []
+            last_error = exc
+
+    if last_error is not None:
+        raise last_error
 
     return data
 

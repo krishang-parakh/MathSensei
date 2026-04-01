@@ -2,6 +2,7 @@ import os
 import time
 import logging
 import codecs
+import re
 from io import StringIO
 from contextlib import redirect_stdout
 from math import isclose
@@ -48,6 +49,76 @@ client = AzureOpenAI(
 GOOGLE_API_KEY = _get_env("GOOGLE_API_KEY")
 if GOOGLE_API_KEY:
     genai.configure(api_key=GOOGLE_API_KEY)
+
+GEMINI_MODEL_NAME = _get_env("GOOGLE_GEMINI_MODEL", default="gemini-1.5-pro")
+GEMINI_FALLBACK_TO_AZURE = (_get_env("GEMINI_FALLBACK_TO_AZURE", default="true") or "true").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+
+
+def _normalize_gemini_model_name(name: Optional[str]) -> Optional[str]:
+    if not name:
+        return None
+
+    normalized = str(name).strip()
+    if not normalized:
+        return None
+
+    lowered = normalized.lower().replace("models/", "").strip()
+    alias_map = {
+        "gemini 3.1 pro": "gemini-2.5-pro",
+        "gemini 3.1 flash": "gemini-2.5-flash",
+        "gemini 2.5 pro": "gemini-2.5-pro",
+        "gemini 2.5 flash": "gemini-2.5-flash",
+        "gemini 2.0 flash": "gemini-2.0-flash",
+        "gemini 1.5 pro": "gemini-1.5-pro",
+        "gemini 1.5 flash": "gemini-1.5-flash",
+        "gemini pro": "gemini-pro",
+        "gemini flash": "gemini-1.5-flash",
+    }
+    return alias_map.get(lowered, lowered)
+
+
+def _list_gemini_models_via_rest():
+    if not GOOGLE_API_KEY:
+        return []
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={GOOGLE_API_KEY}"
+    response = requests.get(url, timeout=30)
+    response.raise_for_status()
+    data = response.json()
+
+    models = []
+    for item in data.get("models", []):
+        supported_methods = item.get("supportedGenerationMethods") or []
+        if "generateContent" not in supported_methods:
+            continue
+
+        name = item.get("name", "")
+        if name.startswith("models/"):
+            name = name.split("/", 1)[1]
+        if name:
+            models.append(name)
+
+    return models
+
+
+def _is_text_gemini_model(name: str) -> bool:
+    lowered = (name or "").lower()
+    blocked_tokens = (
+        "image",
+        "tts",
+        "computer-use",
+        "robotics",
+        "lyria",
+        "gemma",
+        "banana",
+        "customtools",
+    )
+    return not any(token in lowered for token in blocked_tokens)
 
 
 def _normalize_code_block(code_string: str) -> str:
@@ -290,17 +361,172 @@ def get_gemini_response(full_prompt):
     if not GOOGLE_API_KEY:
         raise RuntimeError("GOOGLE_API_KEY is missing from .env")
 
-    while True:
-        gemini_model = genai.GenerativeModel("gemini-pro")
-        response = gemini_model.generate_content(full_prompt)
+    def candidate_model_names():
+        seen = set()
 
+        def add(name, bucket):
+            normalized = _normalize_gemini_model_name(name)
+            if normalized and normalized not in seen:
+                seen.add(normalized)
+                bucket.append(normalized)
+
+        configured = []
+        discovered = []
+        fallbacks = []
+
+        add(GEMINI_MODEL_NAME, configured)
+
+        available_models = []
         try:
-            return response.text
+            available_models = [name for name in _list_gemini_models_via_rest() if _is_text_gemini_model(name)]
         except Exception:
+            available_models = []
+
+        configured_name = _normalize_gemini_model_name(GEMINI_MODEL_NAME)
+        if configured_name and available_models:
+            cfg_tokens = [token for token in re.split(r"[-_\s]+", configured_name) if token]
+            for model_name in available_models:
+                lowered = model_name.lower()
+                if all(token in lowered for token in cfg_tokens if token not in {"gemini"}):
+                    add(model_name, discovered)
+
+        preferred_patterns = [
+            "gemini-3.1-pro-preview",
+            "gemini-3-flash-preview",
+            "gemini-2.5-pro",
+            "gemini-2.5-flash",
+            "gemini-2.0-flash",
+            "gemini-1.5-pro",
+            "gemini-1.5-flash",
+            "gemini-pro",
+        ]
+        for pattern in preferred_patterns:
+            for model_name in available_models:
+                if pattern in model_name:
+                    add(model_name, discovered)
+
+        for name in [
+            "gemini-3.1-pro-preview",
+            "gemini-3-flash-preview",
+            "gemini-2.5-pro",
+            "gemini-2.5-flash",
+            "gemini-2.0-flash",
+            "gemini-1.5-pro",
+            "gemini-1.5-flash",
+            "gemini-pro",
+        ]:
+            add(name, fallbacks)
+
+        for bucket in (configured, discovered, fallbacks):
+            for model_name in bucket:
+                yield model_name
+
+    def extract_text_from_response(response):
+        text = getattr(response, "text", None)
+        if text:
+            return text
+
+        candidates = getattr(response, "candidates", None) or []
+        for candidate in candidates:
+            content = getattr(candidate, "content", None)
+            parts = getattr(content, "parts", None) or []
+            collected = []
+            for part in parts:
+                part_text = getattr(part, "text", None)
+                if part_text:
+                    collected.append(part_text)
+            if collected:
+                return "\n".join(collected).strip()
+
+        return None
+
+    def _azure_fallback():
+        if not GEMINI_FALLBACK_TO_AZURE:
+            return None
+        messages = [{"role": "user", "content": full_prompt}]
+        return _chat_completion(messages=messages, temperature=0, max_tokens=5000)
+
+    errors = []
+
+    available_models_for_error = []
+    try:
+        available_models_for_error = [name for name in _list_gemini_models_via_rest() if _is_text_gemini_model(name)]
+    except Exception as exc:
+        errors.append(f"list-models: {exc}")
+
+    # Prefer the SDK when available.
+    if hasattr(genai, "GenerativeModel"):
+        for model_name in candidate_model_names():
+            for attempt in range(3):
+                try:
+                    gemini_model = genai.GenerativeModel(model_name)
+                    response = gemini_model.generate_content(full_prompt)
+                    text = extract_text_from_response(response)
+                    if text:
+                        return text
+                    errors.append(f"{model_name}: empty response")
+                    break
+                except Exception as exc:
+                    message = str(exc)
+                    retryable = "429" in message or "503" in message or "ResourceExhausted" in message
+                    if retryable and attempt < 2:
+                        time.sleep(2 * (attempt + 1))
+                        continue
+                    errors.append(f"{model_name}: {exc}")
+                    break
+
+    # Fallback to the REST API to avoid SDK-version incompatibilities.
+    for model_name in candidate_model_names():
+        for attempt in range(3):
             try:
-                return response.candidates[0].content.parts[0].text
-            except Exception:
-                continue
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GOOGLE_API_KEY}"
+                payload = {
+                    "contents": [
+                        {
+                            "parts": [
+                                {"text": full_prompt}
+                            ]
+                        }
+                    ]
+                }
+                response = requests.post(url, json=payload, timeout=120)
+
+                if response.status_code in (429, 503) and attempt < 2:
+                    time.sleep(2 * (attempt + 1))
+                    continue
+
+                response.raise_for_status()
+                data = response.json()
+
+                candidates = data.get("candidates") or []
+                for candidate in candidates:
+                    content = candidate.get("content") or {}
+                    parts = content.get("parts") or []
+                    collected = [part.get("text", "") for part in parts if part.get("text")]
+                    if collected:
+                        return "\n".join(collected).strip()
+
+                errors.append(f"{model_name}: empty REST response")
+                break
+            except Exception as exc:
+                message = str(exc)
+                retryable = "429" in message or "503" in message
+                if retryable and attempt < 2:
+                    time.sleep(2 * (attempt + 1))
+                    continue
+                errors.append(f"{model_name}: {exc}")
+                break
+
+    if available_models_for_error:
+        errors.append("available-models: " + ", ".join(sorted(available_models_for_error)))
+
+    if GEMINI_FALLBACK_TO_AZURE:
+        try:
+            return _azure_fallback()
+        except Exception as exc:
+            errors.append(f"azure-fallback: {exc}")
+
+    raise RuntimeError("Gemini call failed. Attempts: " + " | ".join(errors))
 
 
 def get_chat_response(messages, temperature=0, max_tokens=5000, n=1, patience=1, sleep_time=0):

@@ -40,6 +40,15 @@ Example, run the following command to start run on MATH dataset for the setting 
 ```
 python run.py --dataset 'MATH' --model 'pg_walpha_sg' --label 'pg_walpha_sg_results' --debug  
 ````
+
+Each run now also generates a standalone HTML report beside the JSON/JSONL outputs, so you can review or present results in a browser instead of reading raw terminal logs.
+
+### Render a presentation report from an existing output file
+If you already have a readable JSONL or cache JSONL file and want a browser-friendly report for it:
+```
+python src/reporting.py --input src/outputs/MATH_outputs/nitest_test_readable.jsonl
+```
+This will create an HTML file next to the input file.
 ## Datasets
 The datasets used in this work are already included in the ```code/data``` folder.
 - MATH: https://github.com/hendrycks/math/
