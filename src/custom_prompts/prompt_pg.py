@@ -149,10 +149,10 @@ Modules used till now: [Knowledge Retrieval]
 Mathematics Problem Type: PreAlgebra
 Level of Problem: Level 5
 Knowledge Retrieval:
-- The given expression is $\sqrt{(\sqrt{56})(\sqrt{126})}$.
+- The given expression is $\\sqrt{(\\sqrt{56})(\\sqrt{126})}$.
 - To simplify the expression, we can first multiply the square roots inside the main square root.
-- The product of the square roots is $\sqrt{56} \cdot \sqrt{126}$.
-- We can multiply the numbers inside the square roots: $56 \cdot 126$.
+- The product of the square roots is $\\sqrt{56} \\cdot \\sqrt{126}$.
+- We can multiply the numbers inside the square roots: $56 \\cdot 126$.
 - Next, we can find the prime factorization of the product and simplify the square root.
 - Finally, we need to find the sum of the simplified coefficients a and b.
 Python Generator:
@@ -222,7 +222,7 @@ volume = Rational(1, 3) * base_area * PA
 print("Volume",volume)
 
 
-Question: Solve the following system of equations: \begin{align*}2x^2 - y^2 &= 1 \\ 3x^2 + y^2 &= 5 \end{align*}
+Question: Solve the following system of equations: \\begin{align*}2x^2 - y^2 &= 1 \\\\ 3x^2 + y^2 &= 5 \\end{align*}
 Modules used till now: []
 Mathematics Problem Type: Algebra
 Level of Problem: Level 3
@@ -313,9 +313,6 @@ Question: A person is traveling at 20 km/hr and reached his destiny in 2.5 hr th
 Modules used till now: []
 Python Generator:
 # Python Code, print answer.Also Output all the relevant objects in the intermediate steps of the python code. Make sure that the first line of the code is always 'from sympy import *'
-from sympy import *
-# Python Code, print answer, and also output all the relevant objects in the intermediate steps of the python code.
-# Make sure that the first line of the code is always 'from sympy import *'
 from sympy import *
 # Define the variables
 speed = 20  # in km/hr
@@ -418,9 +415,6 @@ Option D: 50 km
 Modules used till now: []
 Python Generator:
 # Python Code, print answer.Also Output all the relevant objects in the intermediate steps of the python code. Make sure that the first line of the code is always 'from sympy import *'
-from sympy import *
-# Python Code, print answer, and also output all the relevant objects in the intermediate steps of the python code.
-# Make sure that the first line of the code is always 'from sympy import *'
 from sympy import *
 # Define the variables
 speed = 20  # in km/hr
@@ -546,64 +540,64 @@ print("The percentage of male single:",male_single_perc)
 prompt_GSM = '''
 
 Read the following mathematical question and then write Python code to answer the question or generate an intermediate result.
+Output ONLY executable Python code.
+- Do not include markdown, prose, copied instructions, or code fences.
+- Prefer direct arithmetic with named variables for GSM word problems.
+- Use SymPy only when a short equation is genuinely needed.
+- Use exact arithmetic when needed, for example Rational(1, 2) instead of 0.5.
+- The last printed line must be the derived numeric answer.
 
 Question: Lisa, Jack, and Tommy earned $60 from washing cars all week. However, half of the $60 was earned by Lisa. Tommy earned half of what Lisa earned. How much more money did Lisa earn than Tommy?
 Modules used till now: []
 Python Generator:
-# Python Code, print answer.Also Output all the relevant objects in the intermediate steps of the python code.
-lisa = None
-jack = None 
-tommy = None 
-# Lisa earns half of 60 
-lisa = 60/2 
-# Tommy earns half of Lisa
-tommy = lisa/2
-# Amount by which Lisa earns more 
-ans = lisa-tommy
-print(f"Lisa earns {ans} more than Tommy")
+from sympy import *
+total_earned = 60
+lisa = total_earned / 2
+tommy = lisa / 2
+ans = lisa - tommy
+print(ans)
 
 Question: Sam and Jeff had a skipping competition at recess. The competition was split into four rounds. Sam completed 1 more skip than Jeff in the first round. Jeff skipped 3 fewer times than Sam in the second round. Jeff skipped 4 more times than Sam in the third round. Jeff got tired and only completed half the number of skips as Sam in the last round. If Sam skipped 16 times in each round, what is the average number of skips per round completed by Jeff?
 Modules used till now: []
 Python Generator:
-# Python Code, print answer.Also Output all the relevant objects in the intermediate steps of the python code.
+from sympy import *
 sam_skips_each_round = 16
 jeff_skips_round1 = sam_skips_each_round - 1
 jeff_skips_round2 = sam_skips_each_round - 3 
 jeff_skips_round3 = sam_skips_each_round + 4 
-jeff_skips_round4 = sam_skips_each_round/2 
-jeff_average_skips = (jeff_skips_round1 + jeff_skips_round2 + jeff_skips_round3 + jeff_skips_round4)/4
-print("The average number of skips per round completed by Jeff is ",jeff_average_skips) 
+jeff_skips_round4 = Rational(1, 2) * sam_skips_each_round
+ans = (jeff_skips_round1 + jeff_skips_round2 + jeff_skips_round3 + jeff_skips_round4) / 4
+print(ans)
 
 Question: Tim has some cans of soda. Jeff comes by, and takes 6 cans of soda from Tim. Tim then goes and buys another half the amount of soda cans he had left. If Tim has 24 cans of soda in the end, how many cans of soda did Tim have at first?
 Modules used till now: []
 Python Generator:
-# Python Code, print answer.Also Output all the relevant objects in the intermediate steps of the python code. 
 from sympy import *
 initial_cans = symbols('initial_cans')
 cans_left_after_jeff = initial_cans - 6
-cans_after_purchase = cans_left_after_jeff + cans_left_after_jeff / 2
-equation = cans_after_purchase - 24
-initial_cans_value = solve(equation, initial_cans)[0]
-print("Initial number of soda cans Tim had:", initial_cans_value)
+cans_after_purchase = cans_left_after_jeff + Rational(1, 2) * cans_left_after_jeff
+equation = Eq(cans_after_purchase, 24)
+ans = solve(equation, initial_cans)[0]
+print(ans)
 
 Question: Sam has 18 cows. 5 more than half the cows are black. How many cows are not black?
 Modules used till now: []
 Python Generator:
-# Python Code, print answer.Also Output all the relevant objects in the intermediate steps of the python code. 
+from sympy import *
 sam_cows = 18
-black_cows = 5 + sam_cows/2 
-not_black_cows = sam_cows - black_cows
-print("The number of cows not black is ",not_black_cows)
+black_cows = 5 + Rational(1, 2) * sam_cows
+ans = sam_cows - black_cows
+print(ans)
 
 Question: In five years Sam will be 3 times as old as Drew. If Drew is currently 12 years old, how old is Sam?
 Modules used till now: []
 Python Generator:
-# Python Code, print answer.Also Output all the relevant objects in the intermediate steps of the python code. 
+from sympy import *
 drew_current_age = 12 
 drew_age_after_5years = drew_current_age + 5
 sam_age_after_5years = 3 * drew_age_after_5years
-sam_current_age = sam_age_after_5years - 5
-print(f"Sam is {sam_current_age} years old")
+ans = sam_age_after_5years - 5
+print(ans)
 
 '''
 
@@ -724,7 +718,7 @@ ans = ways_green * ways_red
 print("Ans:",ans)
 
 
-Question: Rectangle $ABCD$ is the base of pyramid $PABCD$. If $AB = 3$, $BC = 2$, $\\overline{PA}\\perp \\overline{AD}$, $\\overline{PA}\\perp \\overline{AB}$, and $PC = 5$, then what is the volume of $PABCD$? Options:['A)4\sqrt{3}', 'B)1', 'C)1.6', 'D)1.1', 'E)2']
+Question: Rectangle $ABCD$ is the base of pyramid $PABCD$. If $AB = 3$, $BC = 2$, $\\overline{PA}\\perp \\overline{AD}$, $\\overline{PA}\\perp \\overline{AB}$, and $PC = 5$, then what is the volume of $PABCD$? Options:['A)4\\sqrt{3}', 'B)1', 'C)1.6', 'D)1.1', 'E)2']
 Modules used till now: []
 Python Generator:
 # Python Code, print answer.Also Output all the relevant objects in the intermediate steps of the python code. Make sure that the first line of the code is always 'from sympy import *'
@@ -747,10 +741,10 @@ print("Volume",volume)
 Question: The expression $\\sqrt{(\\sqrt{56})(\\sqrt{126})}$ can be simplified to $a\\sqrt b$, where $a$ and $b$ are integers and $b$ is not divisible by any perfect square greater than 1. What is $a+b$? Options:['A)4', 'B)1', 'C)6', 'D)3']
 Modules used till now: [Knowledge Retrieval]
 Knowledge Retrieval:
-- The given expression is $\sqrt{(\sqrt{56})(\sqrt{126})}$.
+- The given expression is $\\sqrt{(\\sqrt{56})(\\sqrt{126})}$.
 - To simplify the expression, we can first multiply the square roots inside the main square root.
-- The product of the square roots is $\sqrt{56} \cdot \sqrt{126}$.
-- We can multiply the numbers inside the square roots: $56 \cdot 126$.
+- The product of the square roots is $\\sqrt{56} \\cdot \\sqrt{126}$.
+- We can multiply the numbers inside the square roots: $56 \\cdot 126$.
 - Next, we can find the prime factorization of the product and simplify the square root.
 - Finally, we need to find the sum of the simplified coefficients a and b.
 Python Generator:

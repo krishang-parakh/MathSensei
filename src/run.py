@@ -3,11 +3,16 @@ import sys
 import json
 import argparse
 import random
+import time
+import copy
+import hashlib
 
 # add the parent directory to the path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))) 
 
-from console_ui import (
+from core.app_support import (
+    GLOBAL_MODEL_CHOICES,
+    apply_global_model_overrides,
     print_module_plan,
     print_module_result,
     print_problem_header,
@@ -16,9 +21,294 @@ from console_ui import (
     print_run_summary,
     print_warning,
 )
+from core.pipeline_shared import (
+    build_initial_question_response,
+    normalize_module_sequence,
+    rebuild_cached_response,
+    resolve_modules_for_model,
+)
 from utilities import *
 from model import solver
-from reporting import generate_report, normalize_record
+from presentation.reporting import generate_report, normalize_record
+from presentation.benchmarking import append_run_benchmark, build_run_benchmark_row, update_aggregate_benchmark
+
+
+MODEL_ALIASES = {
+    "wa_sg": "walpha_sg",
+    "wa_pg_sg": "walpha_pg_sg",
+    "pg_wa_sg": "pg_walpha_sg",
+    "kr_wa_sg": "kr_walpha_sg",
+    "kr_pg_wa_sg": "kr_pg_walpha_sg",
+}
+
+MODEL_CHOICES = [
+    "cot",
+    "pot",
+    "planner",
+    "kr_sg",
+    "kr_walpha_sg",
+    "kr_pg_sg",
+    "kr_pg_walpha_sg",
+    "walpha_sg",
+    "pg_sg",
+    "walpha_pg_sg",
+    "pg_walpha_sg",
+    "bing_sg",
+    "bing_pg_sg",
+    "pg_bing_sg",
+    "bing_walpha_sg",
+    "walpha_bing_sg",
+    "bing_pg_walpha_sg",
+    "sg",
+]
+
+def dataset_display_name(dataset):
+    if dataset == "ALL":
+        return "Mixed"
+    return dataset
+
+
+def default_task_name(dataset):
+    if dataset == "ALL":
+        return "mixed"
+    return str(dataset).lower()
+
+
+def normalize_model_name(model_name):
+    return MODEL_ALIASES.get(model_name, model_name)
+
+
+def data_root_note(data_root):
+    if data_root:
+        return f"--data_root is compatibility-only; dataset file paths still come from environment configuration. Requested: {data_root}"
+    return "Dataset file paths come from environment configuration."
+
+
+def _default_chat_backend_label():
+    return globals().get("MODEL_NAME") or "default chat backend"
+
+
+def _gemini_backend_label():
+    return globals().get("GEMINI_MODEL_NAME") or "gemini"
+
+
+def _configured_or_default_backend(configured_value):
+    if configured_value == "gemini":
+        return _gemini_backend_label()
+    if configured_value not in (None, "", "no"):
+        return str(configured_value)
+    return _default_chat_backend_label()
+
+
+def _module_backend_label(solver_instance, module_name):
+    if module_name == "knowledge_retrieval":
+        return _configured_or_default_backend(getattr(solver_instance, "knowledge_model", "no"))
+    if module_name == "bing_search":
+        return f"Bing API + {_configured_or_default_backend(getattr(solver_instance, 'bing_model', 'no'))}"
+    if module_name == "wolfram_alpha_search":
+        return f"Wolfram Alpha + {_configured_or_default_backend(getattr(solver_instance, 'wolfram_model', 'no'))}"
+    if module_name in {"program_generator", "python_generator_refine_executor"}:
+        return _configured_or_default_backend(getattr(solver_instance, "python_model", "no"))
+    if module_name == "program_executor":
+        return "Local Python"
+    if module_name == "solution_generator":
+        return _configured_or_default_backend(getattr(solver_instance, "sg_model", "no"))
+    if module_name == "answer_generator":
+        return _configured_or_default_backend(getattr(solver_instance, "sg_model", "no"))
+    return _default_chat_backend_label()
+
+
+def call_solver_module(solver_instance, module_name):
+    module_fn = getattr(solver_instance, module_name, None)
+    backend_label = _module_backend_label(solver_instance, module_name)
+    started_at = time.perf_counter()
+
+    if module_fn is None or not callable(module_fn):
+        message = f"Unknown module '{module_name}'"
+        solver_instance.cache.setdefault("module_errors", []).append(message)
+        elapsed_seconds = round(time.perf_counter() - started_at, 4)
+        solver_instance.cache.setdefault("module_timings_seconds", {})[module_name] = elapsed_seconds
+        solver_instance.cache.setdefault("module_backends", {})[module_name] = backend_label
+        return None, f"Skipped: {message}", message, elapsed_seconds, backend_label
+
+    try:
+        module_input, module_output = module_fn()
+        error = None
+    except Exception as exc:
+        message = f"{module_name} failed: {exc}"
+        solver_instance.cache.setdefault("module_errors", []).append(message)
+        module_input, module_output, error = None, f"Execution failed: {exc}", message
+
+    elapsed_seconds = round(time.perf_counter() - started_at, 4)
+    solver_instance.cache.setdefault("module_timings_seconds", {})[module_name] = elapsed_seconds
+    solver_instance.cache.setdefault("module_backends", {})[module_name] = backend_label
+    return module_input, module_output, error, elapsed_seconds, backend_label
+
+
+def resolve_run_modules(args, solver_instance):
+    # Keep pipeline selection in one place so normal runs and future recovery
+    # modes do not drift apart as more model variants are added.
+    try:
+        return resolve_modules_for_model(
+            args.model,
+            refine=args.refine,
+            custom_modules=args.modules,
+            planner_callable=solver_instance.predict_modules,
+        )
+    except ValueError as exc:
+        print_warning(str(exc))
+        return ["solution_generator"]
+
+
+def execute_modules(solver_instance, module_names, debug=False):
+    module_names = normalize_module_sequence(module_names)
+    executed_solution_generator = False
+    for index, module_name in enumerate(module_names):
+        module_input, module_output, error, elapsed_seconds, backend_label = call_solver_module(solver_instance, module_name)
+        if module_name == "solution_generator" and error is None:
+            executed_solution_generator = True
+        print_module_result(module_name, module_input, module_output)
+        if error:
+            print_warning(error)
+        if debug:
+            print(f"======== [Module]: solver.{module_name} ========\n")
+            print(f"# [Input]\n{module_input}\n")
+            print(f"# [Output]\n{module_output}\n")
+            print(f"# [Backend]\n{backend_label}\n")
+            print(f"# [Elapsed Seconds]\n{elapsed_seconds}\n")
+            print(f"======== End module========\n")
+
+        if error and "solution_generator" not in module_names[index + 1:] and not executed_solution_generator:
+            fallback_input, fallback_output, fallback_error, fallback_elapsed_seconds, fallback_backend_label = call_solver_module(solver_instance, "solution_generator")
+            print_module_result("solution_generator", fallback_input, fallback_output)
+            if fallback_error:
+                print_warning(fallback_error)
+            if debug:
+                print(f"======== [Module]: solver.solution_generator ========\n")
+                print(f"# [Input]\n{fallback_input}\n")
+                print(f"# [Output]\n{fallback_output}\n")
+                print(f"# [Backend]\n{fallback_backend_label}\n")
+                print(f"# [Elapsed Seconds]\n{fallback_elapsed_seconds}\n")
+                print(f"======== End module========\n")
+            executed_solution_generator = fallback_error is None
+            break
+
+
+def prepare_example_for_dataset(example, dataset):
+    example = dict(example)
+    if dataset == "AQUA":
+        example["problem"] = example['question'] + " Options:" + str(example['options'])
+    elif dataset == "GSM":
+        example["problem"] = example['question']
+    elif dataset == "MMLU":
+        example["problem"] = (
+            "\n"
+            + example['Question']
+            + "\n"
+            + 'Option A:' + example['Option A']
+            + "\n"
+            + 'Option B:' + example['Option B']
+            + "\n"
+            + 'Option C:' + example['Option C']
+            + "\n"
+            + 'Option D:' + example['Option D']
+        )
+
+    return example
+
+
+def build_question_signature(example, dataset, pid=None):
+    problem = (
+        example.get("problem")
+        or example.get("question")
+        or example.get("Question")
+        or ""
+    )
+    payload = "\n".join(
+        [
+            str(dataset or ""),
+            str(pid if pid is not None else ""),
+            str(problem),
+        ]
+    )
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()
+
+
+def reset_run_artifacts(paths):
+    for path in paths:
+        if path and os.path.exists(path):
+            os.remove(path)
+
+
+def initialize_question_state(solver_instance, pid, example, requested_dataset):
+    example_copy = prepare_example_for_dataset(copy.deepcopy(example), example.get("dataset", requested_dataset))
+    current_dataset = example_copy.get("dataset", requested_dataset)
+
+    solver_instance.cache = {"pid": pid}
+    solver_instance.modules = []
+    solver_instance.dependency_install_attempts = set()
+    solver_instance.dataset = current_dataset
+    solver_instance.cache["example"] = example_copy
+    solver_instance.cache["dataset"] = current_dataset
+    solver_instance.cache["requested_dataset"] = requested_dataset
+    solver_instance.cache["question_signature"] = build_question_signature(example_copy, current_dataset, pid)
+
+    initial_response = build_initial_question_response(example_copy, current_dataset)
+    if initial_response:
+        solver_instance.cache["response"] = initial_response
+
+    return current_dataset
+
+
+def prepare_error_mode_state(solver_instance, cached_row, rerun_modules, requested_dataset):
+    pid = cached_row.get("pid", solver_instance.current_index)
+    example = cached_row.get("example") or {}
+    current_dataset = initialize_question_state(solver_instance, pid, example, requested_dataset)
+
+    preserved_modules = normalize_module_sequence(
+        module_name
+        for module_name in (cached_row.get("modules") or [])
+        if module_name not in set(rerun_modules)
+    )
+
+    preserved_prefixes = {
+        "knowledge_retrieval",
+        "bing_search",
+        "wolfram_alpha_search",
+        "query_generator",
+    }
+    for key, value in cached_row.items():
+        if any(key.startswith(f"{prefix}:") for prefix in preserved_prefixes):
+            solver_instance.cache[key] = copy.deepcopy(value)
+
+    for extra_key in [
+        "query",
+        "bing_query1",
+        "bing_query1_output",
+        "bing_query2",
+        "bing_query2_output",
+        "wolfram_query",
+        "wolfram_output",
+        "wolfram_error",
+        "wolfram_trace",
+        "run_model",
+    ]:
+        if extra_key in cached_row:
+            solver_instance.cache[extra_key] = copy.deepcopy(cached_row[extra_key])
+
+    if "program" in cached_row:
+        solver_instance.cache["program"] = copy.deepcopy(cached_row["program"])
+
+    rebuilt_response = rebuild_cached_response(cached_row, modules=preserved_modules)
+    if rebuilt_response:
+        solver_instance.cache["response"] = rebuilt_response
+    else:
+        solver_instance.cache.pop("response", None)
+
+    solver_instance.cache["dataset"] = current_dataset
+    solver_instance.cache["requested_dataset"] = requested_dataset
+    return current_dataset
+
 
 def parse_args():
 
@@ -26,21 +316,29 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--data_root', type=str, default='data/MATH', choices=['data/MATH', 'data/GSM-8K', 'data/AQUA', 'data/MMLU'])
     parser.add_argument('--data_file', type=str, default='no')
-    parser.add_argument('--dataset', type=str, default='MATH', choices=['MATH', 'GSM', 'AQUA', 'MMLU'])
+    parser.add_argument('--dataset', type=str, default='ALL', choices=['ALL', 'MATH', 'GSM', 'AQUA', 'MMLU'])
+    parser.add_argument(
+        '--mixed_dataset_strategy',
+        type=str,
+        default='balanced',
+        choices=['balanced', 'proportional'],
+        help='When --dataset ALL, sample datasets uniformly at random or keep size-proportional sampling.',
+    )
     parser.add_argument('--output_root', type=str, default='output_MATHSENSEI')
-    parser.add_argument('--model', type=str, default='no', choices=['cot', 'pot','planner','kr_sg','kr_walpha_sg','kr_pg_sg','walpha_sg','pg_sg', 'walpha_pg_sg','walpha_sg','pg_walpha_sg','bing_sg','bing_pg_sg','pg_bing_sg','bing_walpha_sg','walpha_bing_sg','bing_pg_walpha_sg','sg'])
+    parser.add_argument('--model', type=str, default='pg_walpha_sg', choices=MODEL_CHOICES + sorted(MODEL_ALIASES.keys()))
     parser.add_argument('--label', type=str, default='MATHSENSEI_outfile')
-    parser.add_argument('--task_name', type=str, default='math', choices=["math", "gsm", "aqua", "mmlu"])
+    parser.add_argument('--task_name', type=str, default=None, choices=["math", "gsm", "aqua", "mmlu", "mixed"])
     parser.add_argument('--test_split', type=str, default='test', 
                         choices=['train', 'val', 'test', 'minitrain', 'minival', 'minitest'])
 
     parser.add_argument('--test_number', type=int, default=None)    # Set to number of example in dataset
     parser.add_argument('--seed', type=int, default=0)
 
+    parser.add_argument('--global_model', type=str, default='no', choices=GLOBAL_MODEL_CHOICES)
     parser.add_argument('--python_model', type=str, default='no', choices=['code_llama7b_python', 'code_llama13b_python','code_davinci002','code_llama34b','wizardcoder_34B','code_llama34b_pythonV1','gemini'])
     parser.add_argument('--extra_python_libraries', type=str, default='no')
-    parser.add_argument('--knowledge_model', type=str, default='no', choices=['text_davinci_002','text_davinci_003','llama2_13b','llama2_7b'])
-    parser.add_argument('--bing_model', type=str, default='no', choices=['text_davinci_002','text_davinci_003','llama2_13b','llama2_7b'])
+    parser.add_argument('--knowledge_model', type=str, default='no', choices=['text_davinci_002','text_davinci_003','llama2_13b','llama2_7b','gemini'])
+    parser.add_argument('--bing_model', type=str, default='no', choices=['text_davinci_002','text_davinci_003','llama2_13b','llama2_7b','gemini'])
     parser.add_argument('--sg_model', type=str, default='no', choices=['text_davinci_002','text_davinci_003','llama2_13b','llama2_7b','gemini'])
     parser.add_argument('--wolfram_model', type=str, default='no', choices=['gemini','text_davinci_002','text_davinci_003','llama2_13b','llama2_7b'])
 
@@ -84,6 +382,10 @@ def parse_args():
     # debug
     parser.add_argument('--debug', action='store_true')
     args = parser.parse_args()
+    args.model = normalize_model_name(args.model)
+    args = apply_global_model_overrides(args)
+    if args.task_name is None:
+        args.task_name = default_task_name(args.dataset)
 
     print('====Input Arguments====')
     print(json.dumps(vars(args), indent=2, sort_keys=False))
@@ -100,39 +402,60 @@ if __name__ == "__main__":
     print(f"# Number of test examples: {solver.test_number}\n")
    
     # Get the result file
-    result_root = f"{args.output_root}/{args.task_name}"
+    result_root = os.path.abspath(os.path.join(args.output_root, args.task_name))
     os.makedirs(result_root, exist_ok=True)
     cache_file = f"{result_root}/{args.label}_{args.test_split}_cache.json"
     cache_jsonl = f"{result_root}/{args.label}_{args.test_split}_cache.jsonl"
     result_file = f"{result_root}/{args.label}_{args.test_split}.json"
     readable_jsonl = f"{result_root}/{args.label}_{args.test_split}_readable.jsonl"
     report_file = f"{result_root}/{args.label}_{args.test_split}_report.html"
+    run_benchmark_file = f"{result_root}/{args.label}_{args.test_split}_benchmark.json"
+
+    if args.error_mode == "no" and args.current_index == 0:
+        reset_run_artifacts([
+            cache_file,
+            cache_jsonl,
+            result_file,
+            readable_jsonl,
+            report_file,
+            run_benchmark_file,
+        ])
+        print_warning(
+            "Starting a fresh run at index 0, so previous cache/report artifacts for this label were cleared."
+        )
     
-    print_run_header(args, result_file, solver.test_number)
+    print_run_header(args, result_file, solver.test_number, data_note=data_root_note(args.data_root))
     
     # Running in error model 
     if args.error_mode != 'no':  
-        
-        with open(cache_jsonl,'r') as file :
+        indices = []
+        with open(cache_jsonl,'r', encoding="utf-8") as file :
             indices = []
             count = 0 
             for line in file:
-                data = json.loads(line)
-                example_code = (data['program'])
+                try:
+                    data = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    print_warning(f"Skipping malformed cache row {count}: {exc}")
+                    count += 1
+                    continue
+                example_code = data.get('program')
+                if not example_code:
+                    count += 1
+                    continue
                 output, error_message = safe_execute(example_code)
-                if output!=None:
-                       if data['program_executor:output'] != output :
-                          indices.append(count)
-                          count +=1  
+                if output is not None and data.get('program_executor:output') != output:
+                    indices.append(count)
+                count += 1  
     
         print("No of Indices",len(indices))
     
-    error_mode_cache_jsonl_file = f"{result_root}/{args.label}_{args.test_split}_cache_error_mode_pg_sg.jsonl"
+    error_mode_cache_jsonl_file = f"{result_root}/{args.label}_{args.test_split}_cache_error_mode_{args.model}.jsonl"
     
     
     if args.error_mode !='no':
-        with open(cache_jsonl,'r') as infile:
-             with open(error_mode_cache_jsonl_file,'a') as outfile:
+        with open(cache_jsonl,'r', encoding="utf-8") as infile:
+             with open(error_mode_cache_jsonl_file,'a', encoding="utf-8") as outfile:
                  count = 0
                  for line in infile:
                     
@@ -142,19 +465,24 @@ if __name__ == "__main__":
 
                      
                     if count in indices:
-                        data = json.loads(line)
+                        try:
+                            data = json.loads(line)
+                        except json.JSONDecodeError as exc:
+                            print_warning(f"Skipping malformed cache row {count}: {exc}")
+                            count += 1
+                            continue
                         pid = count  
-                        solver.cache = data
 
                         if args.debug:
                             print("\n\n===================================\n")
                             print(f"# [Pid]: {pid}\n") # problem id
                         
                         solver.current_index+= 1                         # number of current results
-                        example_code = (solver.cache['program'])
+                        rerun_modules = ["program_executor","solution_generator"]
+                        prepare_error_mode_state(solver, data, rerun_modules, args.dataset)
                         
 
-                        modules = ["program_executor","solution_generator"]   # Set to setting of error_mode 
+                        modules = rerun_modules   # Set to setting of error_mode 
                         
                         '''
                         if args.modules is not None:
@@ -178,7 +506,7 @@ if __name__ == "__main__":
                                 modules = ["knowledge_retrieval","solution_generator","answer_generator"]
 
                             elif args.model == 'kr_walpha_sg':
-                                modules = ["knowledge_retrieval","walpha","solution_generator"]
+                                modules = ["knowledge_retrieval","wolfram_alpha_search","solution_generator"]
 
                             elif args.model == 'kr_pg_sg':
                                 if args.refine == "no":
@@ -187,31 +515,26 @@ if __name__ == "__main__":
                                    modules = ["knowledge_retrieval","python_generator_refine_executor","solution_generator","answer_generator"] 
 
                             elif args.model == 'walpha_sg':
-                                modules = ["walpha","solution_generator"]
+                                modules = ["wolfram_alpha_search","solution_generator"]
 
                             elif args.model == 'planner':    
                                 modules = solver.predict_modules()
                         '''
-                        modules = [f"solver.{module}" for module in modules]
-
-                            
+                        module_names = list(modules)
+                        solver.modules = list(module_names)
+                        solver.cache["modules"] = list(module_names)
+                        solver.cache["run_model"] = args.model
                         # [2] Execute the modules 
                         if args.debug:
-                            print(f"# [Modules]\n{modules}\n")
+                            print(f"# [Modules]\n{module_names}\n")
                         
-                        solver.modules = solver.modules + modules
                         print("Cache:", solver.cache)
-
-                        for module in modules:
-                            input, output = eval(module)()     # eval the module and update the cache
-                            if args.debug:
-                                print(f"======== [Module]: {module} ========\n")
-                                print(f"# [Input]\n{input}\n")
-                                print(f"# [Output]\n{output}\n")
-                                print(f"======== End module========\n")
+                        question_started_at = time.perf_counter()
+                        execute_modules(solver, module_names, debug=args.debug)
+                        solver.cache["question_elapsed_seconds"] = round(time.perf_counter() - question_started_at, 4)
 
                         try:
-                            json.dump(solver.cache, outfile)
+                            json.dump(solver.cache, outfile, ensure_ascii=False)
                             outfile.write('\n')   
 
                         except Exception as e:
@@ -221,8 +544,13 @@ if __name__ == "__main__":
 
                     
                     elif count not in indices:
-                        data = json.loads(line)
-                        outfile.write(json.dumps(data)+'\n')
+                        try:
+                            data = json.loads(line)
+                        except json.JSONDecodeError as exc:
+                            print_warning(f"Skipping malformed cache row {count}: {exc}")
+                            count += 1
+                            continue
+                        outfile.write(json.dumps(data, ensure_ascii=False)+'\n')
 
                     count+=1     # Increment count 
 
@@ -232,39 +560,23 @@ if __name__ == "__main__":
                                         
     # If error_mode is "no" (Default run)           
     complete_count = 0
-    partial_count = 0
     needs_review_count = 0
+    run_records = []
 
     for pid in range(solver.current_index, solver.test_number):
 
  
-        solver.cache = {"pid": pid}      # clear the cache
-       
-
         if args.debug:
             print("\n\n===================================\n")
             print(f"# [Pid]: {pid}\n") # problem id
         
         solver.current_index+= 1                         # number of current results
-        solver.cache["example"] = solver.examples[pid]   # get one example 
-        
-        if args.dataset == "AQUA":
-            solver.cache["example"]["problem"] =  solver.cache["example"]['question'] + " Options:" +  str(solver.cache["example"]['options']) 
-        
-        if args.dataset == "GSM": # Convert to key problem
-            solver.cache["example"]["problem"] =  solver.cache["example"]['question']
-
-        if args.dataset == "MMLU": # Convert to key problem
-            solver.cache["example"]["problem"] =  "\n" + solver.cache["example"]['Question'] + "\n" + 'Option A:' + solver.cache["example"]['Option A'] + "\n" + 'Option B:' + solver.cache["example"]['Option B'] + "\n" + 'Option C:' + solver.cache["example"]['Option C'] + "\n" + 'Option D:' + solver.cache["example"]['Option D']
-
-        if args.dataset == "MATH":
-            try: 
-                typ = str(solver.cache["example"]["type"])
-            except:
-                typ = str(solver.cache["example"]['subject'])
-
-            lvl = str(solver.cache["example"]["level"])
-            solver.cache["response"] = f"\nMathematics Problem Type:{typ}\nLevel of Problem:{lvl}"
+        current_dataset = initialize_question_state(
+            solver,
+            pid,
+            solver.examples[pid],
+            args.dataset,
+        )
         
         problem_preview = (
             solver.cache["example"].get("problem")
@@ -274,101 +586,38 @@ if __name__ == "__main__":
         )
         print_problem_header(pid, solver.test_number, problem_preview)
         
-        if args.modules is not None:
-            modules = args.modules
-        else:
-            if args.model == 'cot' or  args.model =='sg':
-                modules = ["solution_generator"]
-
-            elif args.model == 'pg_sg':
-                if args.refine == "no":
-                     modules = ["program_generator","program_executor","solution_generator"]
-
-                else:
-                     modules = ["python_generator_refine_executor","solution_generator"]    
-            
-                  
-            elif args.model == 'bing_sg':
-                modules = ["bing_search","solution_generator"]
-
-            elif args.model == 'bing_pg_sg':
-                modules = ["bing_search","program_generator","program_executor","solution_generator"]
-            
-            elif args.model == 'bing_walpha_sg':
-                modules = ["bing_search",'wolfram_alpha_search',"solution_generator"]
-            
-            elif args.model == 'bing_pg_walpha_sg':
-                modules = ["bing_search","program_generator","program_executor",'wolfram_alpha_search',"solution_generator"]
-            
-            elif args.model == 'walpha_bing_sg' :
-                 modules = ['wolfram_alpha_search',"bing_search","solution_generator"]
-
-
-            elif args.model == 'pg_bing_sg':
-                modules = ["program_generator","program_executor","bing_search","solution_generator"]
-
-            elif args.model == 'kr_sg':
-                modules = ["knowledge_retrieval","solution_generator"]
-
-            elif args.model == 'kr_walpha_sg':
-                modules = ["knowledge_retrieval",'wolfram_alpha_search',"solution_generator"]
-            
-            elif args.model == 'walpha_pg_sg':
-                 modules = ['wolfram_alpha_search',"program_generator","program_executor","solution_generator"]
-
-            elif args.model == 'pg_walpha_sg':
-                 modules = ["program_generator","program_executor",'wolfram_alpha_search',"solution_generator"]     
-
-
-            elif args.model == 'kr_pg_sg':
-                if args.refine == "no":
-                   modules = ["knowledge_retrieval","program_generator","program_executor","solution_generator"] 
-                else:
-                   modules = ["knowledge_retrieval","python_generator_refine_executor","solution_generator"] 
-            
-            elif args.model == 'walpha_sg':
-                            ##modules = ['wolfram_alpha_search',"wolfram_alpha_search","solution_generator"]
-                            modules = ['wolfram_alpha_search',"solution_generator"]
-
-            elif  args.model == 'planner':
-              modules = solver.predict_modules()
+        modules = resolve_run_modules(args, solver)
         
         module_names = list(modules)
         print_module_plan(module_names)
-        solver.modules = solver.modules + module_names
-        module_calls = [f"solver.{module}" for module in module_names]
-        
-       
+        solver.modules = list(module_names)
+        solver.cache["modules"] = list(module_names)
+        solver.cache["run_model"] = args.model
             
         # [2] Execute the modules 
         if args.debug:
-            print(f"# [Modules]\n{module_calls}\n")
-            
-        for module_name, module in zip(module_names, module_calls):
-            input, output = eval(module)()     # eval the module and update the cache
-            print_module_result(module_name, input, output)
-            if args.debug:
-                print(f"======== [Module]: {module} ========\n")
-                print(f"# [Input]\n{input}\n")
-                print(f"# [Output]\n{output}\n")
-                print(f"======== End module========\n")
+            print(f"# [Modules]\n{module_names}\n")
+        question_started_at = time.perf_counter()
+        execute_modules(solver, module_names, debug=args.debug)
+        solver.cache["question_elapsed_seconds"] = round(time.perf_counter() - question_started_at, 4)
         
 
-        with open(cache_file, "a") as f:
+        with open(cache_file, "a", encoding="utf-8") as f:
             try:
-                f.write(json.dumps(solver.cache, indent=2, separators=(',', ': ')) + "\n")
+                f.write(json.dumps(solver.cache, indent=2, separators=(',', ': '), ensure_ascii=False) + "\n")
             except Exception as e:
                 print(e)
                 print(solver.cache)
         
-        with open(cache_jsonl, "a") as f:
+        with open(cache_jsonl, "a", encoding="utf-8") as f:
             try:
-                json.dump(solver.cache, f)
+                json.dump(solver.cache, f, ensure_ascii=False)
                 f.write('\n')
             except Exception as e:
                 print_warning(str(e))
 
         normalized_record = normalize_record(solver.cache)
+        run_records.append(normalized_record)
         with open(readable_jsonl, "a", encoding="utf-8") as f:
             try:
                 json.dump(normalized_record, f, ensure_ascii=False)
@@ -378,27 +627,35 @@ if __name__ == "__main__":
 
         if normalized_record["status"] == "complete":
             complete_count += 1
-        elif normalized_record["status"] == "needs-review":
-            needs_review_count += 1
         else:
-            partial_count += 1
+            needs_review_count += 1
 
         print_problem_summary(solver.cache)
 
+    benchmark_row = build_run_benchmark_row(args, run_records)
+    with open(run_benchmark_file, "w", encoding="utf-8") as handle:
+        json.dump(benchmark_row, handle, indent=2, ensure_ascii=False)
+    append_run_benchmark(args.output_root, benchmark_row)
+    _, aggregate_row = update_aggregate_benchmark(args.output_root, benchmark_row)
+
     try:
         generate_report(
-            readable_jsonl,
+            cache_jsonl,
             output_path=report_file,
-            title=f"MathSensei ({args.dataset})",
+            title="MathSensei",
+            run_benchmark=benchmark_row,
+            aggregate_benchmark=aggregate_row,
         )
     except Exception as e:
-        print_warning(f"Failed to generate HTML report: {e}")
+        print_warning(f"Failed to generate HTML report at {os.path.normpath(report_file)}: {e}")
 
     print_run_summary(
         solver.test_number,
-        complete_count + partial_count,
+        complete_count,
         needs_review_count,
-        report_file,
+        result_root,
+        report_path=report_file,
+        benchmark=benchmark_row,
     )
 
 

@@ -1,4 +1,5 @@
 from model import *
+from core.answer_parsing import extract_numeric_answer, extract_option_letter
 
 from dotenv import load_dotenv
 load_dotenv(".env")
@@ -127,7 +128,6 @@ def _strip_string(string):
 
     # remove percentage
     string = string.replace("\\%", "")
-    string = string.replace("\%", "")
 
     # " 0." equivalent to " ." and "{0." equivalent to "{." Alternatively, add "0" if "." is the start of the string
     string = string.replace(" .", " 0.")
@@ -894,13 +894,9 @@ def accuracy_by_level(filepath):
 
 
 def extract_answer(text):
-    import re
-    # Check if "the answer is" or "The answer is" is present in the string
-    answer_match = re.search(r'(?:the answer is|The answer is)\s+([A-Z])', text)
-    
+    answer_match = extract_option_letter(text)
     if answer_match:
-        # Extract the next character after space if it is a capital letter
-        return answer_match.group(1)
+        return answer_match
 
     # Check if "boxed" is present in the string
     boxed_match = re.search(r'\\boxed{\\textbf{[(](.)[)]}}', text)
@@ -914,19 +910,7 @@ def extract_answer(text):
     
 
 def extract_option_AQUA(input_string):
-    # Define a regular expression pattern to find the option
-    pattern = re.compile(r"[Tt]he answer is [A-Z]")
-
-    # Search for the pattern in the input string
-    match = re.search(pattern, input_string)
-
-    # If a match is found, return the extracted option
-    if match:
-       s = match.group(0)
-       s = s.strip()
-       return s[-1]
-    else:
-        return None       # Return None if no match is found
+    return extract_option_letter(input_string)
 
 
 def accuracy_AQUA(filepath):
@@ -1021,15 +1005,11 @@ def accuracy_AQUA(filepath):
 
 
 def GSM_extract_answer(completion):
-    ANS_RE = re.compile(r"#### (\-?[0-9\.\,]+)")
     INVALID_ANS = "[invalid]"
-    match = ANS_RE.search(completion)
-    if match:
-        match_str = match.group(1).strip()
-        match_str = match_str.replace(",", "")
-        return match_str
-    else:
-        return INVALID_ANS 
+    match_str = extract_numeric_answer(completion)
+    if match_str is None:
+        return INVALID_ANS
+    return match_str.replace(",", "")
 
 
 def accuracy_GSM(filepath):
@@ -1118,15 +1098,11 @@ def accuracy_GSM(filepath):
 
 
 def MMLU_extract_answer(completion):
-    ANS_RE = re.compile("#### (\-?[A-D])")
     INVALID_ANS = "[invalid]"
-    match = ANS_RE.search(completion)
-    if match:
-        match_str = match.group(1).strip()
-        match_str = match_str.replace(",", "")
-        return match_str
-    else:
-        return INVALID_ANS 
+    match_str = extract_option_letter(completion, allowed="ABCD")
+    if match_str is None:
+        return INVALID_ANS
+    return match_str.replace(",", "")
 
 
 

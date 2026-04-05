@@ -5,8 +5,15 @@ import unicodedata
 from typing import Any, Dict, List, Optional
 
 import requests
-import xmltodict
-from wolframalpha import Document
+try:
+    import xmltodict
+except Exception:
+    xmltodict = None
+
+try:
+    from wolframalpha import Document
+except Exception:
+    Document = None
 
 
 WOLFRAM_QUERY_URL = "https://api.wolframalpha.com/v2/query"
@@ -16,6 +23,30 @@ SHORT_ANSWER_FAILURE_MARKERS = (
     "did not understand your input",
     "no short answer available",
     "error ",
+)
+
+PREFERRED_POD_TITLES = (
+    "result",
+    "exact result",
+    "decimal approximation",
+    "solutions",
+    "solution",
+    "real solutions",
+    "values",
+    "value",
+)
+
+DEPRIORITIZED_POD_TITLES = (
+    "input interpretation",
+    "input",
+)
+
+_UNIT_AFTER_NUMBER_RE = re.compile(
+    r"(?P<number>\b\d+(?:\.\d+)?(?:/\d+(?:\.\d+)?)?)"
+    r"\s+"
+    r"(?P<unit>[A-Za-z][A-Za-z0-9]*(?:/[A-Za-z][A-Za-z0-9]*)*"
+    r"(?:\s+[A-Za-z][A-Za-z0-9]*(?:/[A-Za-z][A-Za-z0-9]*)*)*)"
+    r"(?=\s*(?:[+\-*/^(),]|$))"
 )
 
 
@@ -36,6 +67,7 @@ def clean_wolfram_query(query: Optional[str]) -> Optional[str]:
 
     q = q.replace("`", "")
     q = q.replace("**", "")
+    q = q.replace("$", "")
     q = q.replace("\\[", "").replace("\\]", "")
     q = q.replace("\u200b", "").replace("\ufeff", "")
 
@@ -74,6 +106,18 @@ def clean_wolfram_query(query: Optional[str]) -> Optional[str]:
     return q or None
 
 
+def _build_unitless_arithmetic_candidate(query: Optional[str]) -> Optional[str]:
+    cleaned = clean_wolfram_query(query)
+    if not cleaned or not re.search(r"\d", cleaned) or not re.search(r"[A-Za-z]", cleaned):
+        return None
+
+    rewritten = _UNIT_AFTER_NUMBER_RE.sub(lambda match: match.group("number"), cleaned)
+    rewritten = " ".join(rewritten.split())
+    if rewritten == cleaned:
+        return None
+    return clean_wolfram_query(rewritten)
+
+
 def _build_query_candidates(query: Optional[str]) -> List[str]:
     cleaned = clean_wolfram_query(query)
     if not cleaned:
@@ -88,6 +132,7 @@ def _build_query_candidates(query: Optional[str]) -> List[str]:
 
     add(cleaned)
     add(cleaned.replace(", ", ","))
+    add(_build_unitless_arithmetic_candidate(cleaned))
 
     if cleaned.startswith("solve ") and " using Wolfram Alpha code" in cleaned:
         add(cleaned.replace(" using Wolfram Alpha code", ""))
@@ -96,6 +141,8 @@ def _build_query_candidates(query: Optional[str]) -> List[str]:
 
 
 def _query_wolfram_v2(session: requests.Session, app_id: str, query: str, timeout: int) -> Dict[str, Any]:
+    if xmltodict is None or Document is None:
+        raise RuntimeError("Wolfram Alpha parsing dependencies are not installed")
     response = session.get(
         WOLFRAM_QUERY_URL,
         params={"appid": app_id, "input": query},
@@ -140,6 +187,58 @@ def _build_short_answer_result(query: str, answer: str) -> Dict[str, Any]:
     }
 
 
+def extract_wolfram_plaintext_answer(result: Any) -> Optional[str]:
+    if not isinstance(result, dict):
+        return None
+
+    pods = result.get("pod") or []
+    if isinstance(pods, dict):
+        pods = [pods]
+
+    ranked_candidates = []
+    fallback_candidates = []
+
+    for pod in pods:
+        if not isinstance(pod, dict):
+            continue
+
+        title = str(pod.get("@title") or pod.get("title") or "").strip().lower()
+        primary = str(pod.get("@primary") or pod.get("primary") or "").strip().lower() in {"true", "1", "yes"}
+        subpods = pod.get("subpod") or []
+        if isinstance(subpods, dict):
+            subpods = [subpods]
+
+        for subpod in subpods:
+            if not isinstance(subpod, dict):
+                continue
+            plaintext = subpod.get("plaintext")
+            if plaintext in (None, ""):
+                continue
+            answer = str(plaintext).strip()
+            if not answer:
+                continue
+
+            if any(token in title for token in DEPRIORITIZED_POD_TITLES):
+                fallback_candidates.append(answer)
+                continue
+
+            score = 2
+            if primary:
+                score = 0
+            elif any(token in title for token in PREFERRED_POD_TITLES):
+                score = 1
+            ranked_candidates.append((score, answer))
+
+    if ranked_candidates:
+        ranked_candidates.sort(key=lambda item: item[0])
+        return ranked_candidates[0][1]
+
+    if fallback_candidates:
+        return fallback_candidates[0]
+
+    return None
+
+
 def query_wolfram_alpha(
     app_id: str,
     query: Optional[str],
@@ -157,6 +256,15 @@ def query_wolfram_alpha(
             "answer": None,
             "source": None,
             "error": "Empty Wolfram Alpha query",
+        }
+
+    if xmltodict is None or Document is None:
+        return {
+            "query": candidates[0],
+            "result": None,
+            "answer": None,
+            "source": None,
+            "error": "Wolfram Alpha dependencies are not installed",
         }
 
     session = requests.Session()

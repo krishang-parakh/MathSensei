@@ -1,16 +1,29 @@
+import ast
 import os
 import time
 import logging
 import codecs
+import re
 from io import StringIO
 from contextlib import redirect_stdout
 from math import isclose
 from typing import Any, Optional
 
-import matplotlib
+try:
+    import matplotlib
+except Exception:
+    matplotlib = None
 import requests
-import google.generativeai as genai
-from dotenv import load_dotenv
+try:
+    import google.generativeai as genai
+except Exception:
+    genai = None
+from presentation.asy_rendering import strip_asy_blocks_for_model_input
+try:
+    from dotenv import load_dotenv
+except Exception:
+    def load_dotenv(*args, **kwargs):
+        return False
 from openai import AzureOpenAI
 
 logging.basicConfig(
@@ -23,7 +36,8 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ENV_PATH = os.path.join(BASE_DIR, ".env")
 load_dotenv(ENV_PATH)
 
-matplotlib.use("Agg")
+if matplotlib is not None:
+    matplotlib.use("Agg")
 
 
 def _get_env(name: str, default: Optional[str] = None, required: bool = False) -> Optional[str]:
@@ -46,10 +60,92 @@ client = AzureOpenAI(
 )
 
 GOOGLE_API_KEY = _get_env("GOOGLE_API_KEY")
-if GOOGLE_API_KEY:
+if GOOGLE_API_KEY and genai is not None:
     genai.configure(api_key=GOOGLE_API_KEY)
 
-GEMINI_MODEL_NAME = _get_env("GOOGLE_GEMINI_MODEL", default="gemini-1.5-pro")
+DEFAULT_GEMINI_MODEL_CANDIDATES = (
+    "gemini-2.5-flash",
+    "gemini-2.0-flash",
+    "gemini-2.0-flash-lite",
+    "gemini-2.5-pro",
+    "gemini-1.5-flash",
+    "gemini-1.5-pro",
+    "gemini-pro",
+)
+GEMINI_MODEL_NAME = _get_env("GOOGLE_GEMINI_MODEL", default="gemini-2.5-flash")
+
+
+def _normalize_gemini_model_name(name: Optional[str]) -> Optional[str]:
+    if name is None:
+        return None
+    normalized = str(name).strip()
+    if normalized.startswith("models/"):
+        normalized = normalized.split("/", 1)[1]
+    return normalized or None
+
+
+def _split_gemini_model_names(raw_value: Optional[str]):
+    if raw_value is None:
+        return []
+    names = []
+    for part in re.split(r"[,\n;]+", str(raw_value)):
+        normalized = _normalize_gemini_model_name(part)
+        if normalized:
+            names.append(normalized)
+    return names
+
+
+def _discover_gemini_model_names():
+    if genai is None or not hasattr(genai, "list_models"):
+        return []
+
+    try:
+        discovered = []
+        for model in genai.list_models():
+            methods = getattr(model, "supported_generation_methods", None) or []
+            name = _normalize_gemini_model_name(getattr(model, "name", None))
+            if name and "generateContent" in methods and "gemini" in name.lower():
+                discovered.append(name)
+        return discovered
+    except Exception as exc:
+        logging.info("Gemini model discovery failed: %s", exc)
+        return []
+
+
+def _candidate_gemini_model_names(preferred: Optional[str] = None, discovered=None):
+    seen = set()
+    candidates = []
+
+    preferred_names = _split_gemini_model_names(preferred)
+    if not preferred_names:
+        preferred_names = _split_gemini_model_names(GEMINI_MODEL_NAME)
+
+    for name in preferred_names:
+        if "pro" in name and "gemini-2.5-flash" not in preferred_names:
+            # If a pro model is preferred, keep a lower-quota flash model close behind it.
+            for fallback in ("gemini-2.5-flash", "gemini-2.0-flash"):
+                if fallback not in preferred_names:
+                    preferred_names.append(fallback)
+            break
+
+    for name in preferred_names + list(DEFAULT_GEMINI_MODEL_CANDIDATES) + list(discovered or []):
+        normalized = _normalize_gemini_model_name(name)
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            candidates.append(normalized)
+
+    return candidates
+
+
+def _http_status_code_from_error(exc) -> Optional[int]:
+    response = getattr(exc, "response", None)
+    if response is not None and getattr(response, "status_code", None):
+        return int(response.status_code)
+
+    match = re.search(r"\b([45]\d{2})\b", str(exc))
+    if match:
+        return int(match.group(1))
+    return None
 
 
 def _normalize_code_block(code_string: str) -> str:
@@ -66,39 +162,146 @@ def _normalize_code_block(code_string: str) -> str:
 
     return new_code_string
 
+
+def _sanitize_text_for_model_input(text):
+    if text is None:
+        return None
+    if isinstance(text, str):
+        return strip_asy_blocks_for_model_input(text)
+    if isinstance(text, list):
+        sanitized_parts = []
+        for part in text:
+            if isinstance(part, dict):
+                sanitized_part = dict(part)
+                if isinstance(sanitized_part.get("text"), str):
+                    sanitized_part["text"] = strip_asy_blocks_for_model_input(sanitized_part["text"])
+                sanitized_parts.append(sanitized_part)
+            else:
+                sanitized_parts.append(part)
+        return sanitized_parts
+    return text
+
+
+def _sanitize_messages_for_model_input(messages):
+    sanitized_messages = []
+    for message in messages:
+        sanitized_message = dict(message)
+        if "content" in sanitized_message:
+            sanitized_message["content"] = _sanitize_text_for_model_input(sanitized_message["content"])
+        sanitized_messages.append(sanitized_message)
+    return sanitized_messages
+
+
+_SAFE_EVALF_HELPER_NAME = "__mathsensei_safe_evalf__"
+
+
+def _safe_evalf(value, *args, **kwargs):
+    if hasattr(value, "evalf"):
+        return value.evalf(*args, **kwargs)
+    return value
+
+
+def _rewrite_evalf_calls(code_string: str) -> str:
+    try:
+        parsed = ast.parse(code_string)
+    except SyntaxError:
+        return code_string
+
+    class _EvalfGuardTransformer(ast.NodeTransformer):
+        def visit_Call(self, node):
+            self.generic_visit(node)
+            if isinstance(node.func, ast.Attribute) and node.func.attr == "evalf":
+                return ast.copy_location(
+                    ast.Call(
+                        func=ast.Name(id=_SAFE_EVALF_HELPER_NAME, ctx=ast.Load()),
+                        args=[node.func.value] + list(node.args),
+                        keywords=list(node.keywords),
+                    ),
+                    node,
+                )
+            return node
+
+    rewritten = _EvalfGuardTransformer().visit(parsed)
+    ast.fix_missing_locations(rewritten)
+
+    if hasattr(ast, "unparse"):
+        try:
+            return ast.unparse(rewritten)
+        except Exception:
+            pass
+
+    try:
+        import astor
+    except Exception:
+        return code_string
+
+    try:
+        return astor.to_source(rewritten).strip()
+    except Exception:
+        return code_string
+
+
+def _prepare_code_for_execution(code_string: str) -> str:
+    normalized = _normalize_code_block(code_string)
+    return _rewrite_evalf_calls(normalized)
+
+
+def _attempt_missing_dependency_install(error_message: str):
+    try:
+        from core.python_pipeline import install_missing_dependency
+    except Exception:
+        return False, None
+
+    install_result = install_missing_dependency(error_message)
+    return bool(install_result.get("installed")), install_result
+
 def safe_execute(code_string: str, keys=None):
     import codecs
     from io import StringIO
     from contextlib import redirect_stdout
-    import matplotlib
-    matplotlib.use('Agg')
-
-    new_code_string = codecs.decode(code_string, 'unicode_escape')
-    new_code_string = new_code_string.strip()
-
-    if new_code_string.startswith("```python"):
-        new_code_string = new_code_string[len("```python"):].strip()
-    elif new_code_string.startswith("```"):
-        new_code_string = new_code_string[len("```"):].strip()
-
-    if new_code_string.endswith("```"):
-        new_code_string = new_code_string[:-3].strip()
-
-    output = None
-    error_message = None
-
     try:
-        buffer = StringIO()
-        exec_globals = {"__name__": "__main__"}
-        with redirect_stdout(buffer):
-            exec(new_code_string, exec_globals)
-        output = buffer.getvalue()
-    except Exception as e:
-        error_message = str(e)
+        import matplotlib as _matplotlib
+    except Exception:
+        _matplotlib = None
+    if _matplotlib is not None:
+        _matplotlib.use('Agg')
+
+    new_code_string = _prepare_code_for_execution(code_string)
+
+    attempted_packages = set()
+
+    while True:
+        output = None
+        error_message = None
+
+        try:
+            buffer = StringIO()
+            exec_globals = {
+                "__name__": "__main__",
+                _SAFE_EVALF_HELPER_NAME: _safe_evalf,
+            }
+            with redirect_stdout(buffer):
+                exec(new_code_string, exec_globals)
+            output = buffer.getvalue()
+            break
+        except Exception as e:
+            rendered_error = str(e).strip()
+            if rendered_error:
+                error_message = f"{type(e).__name__}: {rendered_error}"
+            else:
+                error_message = type(e).__name__
+
+            installed, install_result = _attempt_missing_dependency_install(error_message)
+            package_name = (install_result or {}).get("package")
+            if installed and package_name and package_name not in attempted_packages:
+                attempted_packages.add(package_name)
+                continue
+            break
 
     return output, error_message
 
 def get_llama_response(tokenizer, pipeline, prompt, temperature=0.5):
+    prompt = _sanitize_text_for_model_input(prompt)
     prompt = f"<s>[INST] {prompt.strip()} [/INST]"
 
     sequences = pipeline(
@@ -122,6 +325,7 @@ def get_llama_response(tokenizer, pipeline, prompt, temperature=0.5):
 
 
 def get_llama_13bresponse(tokenizer, pipeline, prompt, temperature=0.5):
+    prompt = _sanitize_text_for_model_input(prompt)
     sequences = pipeline(
         prompt,
         do_sample=True,
@@ -152,6 +356,7 @@ def _sleep_if_needed(sleep_time: float) -> None:
 def get_textdavinci002_response(prompt, temperature, max_tokens, n=1, patience=1, sleep_time=0):
     deployment = _get_env("OPENAI_TEXTDAVC002_DEPLOYMENT_NAME", required=True)
     last_error = None
+    prompt = _sanitize_text_for_model_input(prompt)
 
     while patience > 0:
         patience -= 1
@@ -178,6 +383,7 @@ def get_textdavinci002_response(prompt, temperature, max_tokens, n=1, patience=1
 def get_textdavinci003_response(prompt, temperature, max_tokens, n=1, patience=1, sleep_time=0):
     deployment = _get_env("OPENAI_TEXTDAVC003_DEPLOYMENT_NAME", required=True)
     last_error = None
+    prompt = _sanitize_text_for_model_input(prompt)
 
     logging.info("-------Text davinci 003 response------")
     while patience > 0:
@@ -214,6 +420,7 @@ def get_gpt3_response(
     sleep_time=0,
 ):
     last_error = None
+    prompt = _sanitize_text_for_model_input(prompt)
 
     while patience > 0:
         patience -= 1
@@ -237,6 +444,7 @@ def get_gpt3_response(
 
 
 def _chat_completion(messages, temperature=0.0, max_tokens=5000, stop=None):
+    messages = _sanitize_messages_for_model_input(messages)
     kwargs = {
         "model": AZURE_DEPLOYMENT_NAME,
         "messages": messages,
@@ -291,21 +499,13 @@ def get_chat_response_code(
 def get_gemini_response(full_prompt):
     if not GOOGLE_API_KEY:
         raise RuntimeError("GOOGLE_API_KEY is missing from .env")
+    if genai is None:
+        raise RuntimeError("google.generativeai is not installed")
+    full_prompt = _sanitize_text_for_model_input(full_prompt)
 
     def candidate_model_names():
-        seen = set()
-        for name in [
-            GEMINI_MODEL_NAME,
-            "gemini-1.5-pro",
-            "gemini-1.5-flash",
-            "gemini-pro",
-        ]:
-            if not name:
-                continue
-            normalized = str(name).strip()
-            if normalized and normalized not in seen:
-                seen.add(normalized)
-                yield normalized
+        for name in _candidate_gemini_model_names(discovered=_discover_gemini_model_names()):
+            yield name
 
     def extract_text_from_response(response):
         text = getattr(response, "text", None)
@@ -327,18 +527,21 @@ def get_gemini_response(full_prompt):
         return None
 
     errors = []
+    rate_limited_models = set()
 
     # Prefer the SDK when available.
-    if hasattr(genai, "GenerativeModel"):
+    if genai is not None and hasattr(genai, "GenerativeModel"):
         for model_name in candidate_model_names():
             try:
-                gemini_model = genai.GenerativeModel(GOOGLE_GEMINI_MODEL)
+                gemini_model = genai.GenerativeModel(model_name)
                 response = gemini_model.generate_content(full_prompt)
                 text = extract_text_from_response(response)
                 if text:
                     return text
                 errors.append(f"{model_name}: empty response")
             except Exception as exc:
+                if _http_status_code_from_error(exc) == 429:
+                    rate_limited_models.add(model_name)
                 errors.append(f"{model_name}: {exc}")
 
     # Fallback to the REST API to avoid SDK-version incompatibilities.
@@ -368,9 +571,21 @@ def get_gemini_response(full_prompt):
 
             errors.append(f"{model_name}: empty REST response")
         except Exception as exc:
+            if _http_status_code_from_error(exc) == 429:
+                rate_limited_models.add(model_name)
             errors.append(f"{model_name}: {exc}")
 
-    raise RuntimeError("Gemini call failed. Attempts: " + " | ".join(errors))
+    if rate_limited_models:
+        logging.warning(
+            "Gemini rate limit hit for models: %s",
+            ", ".join(sorted(rate_limited_models)),
+        )
+
+    raise RuntimeError(
+        "Gemini call failed. Attempts: "
+        + " | ".join(errors)
+        + " | Hint: set GOOGLE_GEMINI_MODEL to a currently available flash model such as gemini-2.5-flash if pro is rate-limited."
+    )
 
 
 def get_chat_response(messages, temperature=0, max_tokens=5000, n=1, patience=1, sleep_time=0):

@@ -11,9 +11,7 @@ load_dotenv(".env")
 import langchain 
 import time
 import random
-import openai
 import func_timeout
-import requests
 import numpy as np
 import logging
 from typing import Union, Any
@@ -57,23 +55,18 @@ llm = AzureChatOpenAI(
 import wolframalpha
 
 # Import prompts
-from REACT_prompts import prompts_MATH_react,prompt_walpha_context_withthought_REACT,prompt_bing_query_REACT,prompt_bing_answer_extractor
-from custom_prompts import prompt_codefixer
-
-
-def build_prompt_for_kr_walpha_sg(question,context):
-        
-        # build the prompt
-        demo_prompt = prompt_walpha_kr_sg.strip() # WARNING: this is the prompt for kr_sg
-        
-        if context!= "":
-            test_prompt = f"Question: {question}\n\n{context}\n\nSolution: "
-        else:
-            test_prompt = f"Question: {question}\n\nSolution: "
-        
-        full_prompt = demo_prompt + "\n\n" + test_prompt # full prompt
-        
-        return test_prompt, full_prompt
+from custom_prompts.react_prompt_library import (
+    prompt_bing_answer_extractor,
+    prompt_bing_query_REACT,
+    prompt_walpha_context_withthought_REACT,
+    prompts_KR_react,
+    prompts_MATH_react,
+    prompts_PG_REACT,
+    prompts_TC_REACT,
+)
+from custom_prompts.core_prompts import prompt_codefixer
+from utilities import safe_execute as shared_safe_execute
+from presentation.asy_rendering import strip_asy_blocks_for_model_input
 
               
 
@@ -112,9 +105,6 @@ def parse_bing_result(result):
             responses.append(snippet)
         
     return responses
-
-from REACT_prompts import prompts_KR_react,prompts_PG_REACT,prompts_TC_REACT
-
 
 # Read the jsonl file 
 def read_jsonl_file(file_path):
@@ -167,92 +157,7 @@ def last_boxed_only_string(string):
     return retval
 
 def safe_execute(code_string: str, keys=None):
-    import codecs
-    from io import StringIO
-    from contextlib import redirect_stdout
-    import matplotlib
-    matplotlib.use('Agg')
-
-    new_code_string = codecs.decode(code_string, 'unicode_escape')
-    
-    new_code_string = new_code_string.strip()
-    if new_code_string.startswith("```python"):
-        new_code_string = new_code_string[len("```python"):].strip()
-    if new_code_string.startswith("```"):
-        new_code_string = new_code_string[len("```"):].strip()
-    if new_code_string.endswith("```"):
-        new_code_string = new_code_string[:-3].strip()
-
-    output = None
-    error_message = None
-
-    def _run_code():
-        buffer = StringIO()
-        with redirect_stdout(buffer):
-            exec(new_code_string, globals())
-        return buffer.getvalue()
-
-    try:
-        output = func_timeout.func_timeout(10, _run_code)
-    except func_timeout.FunctionTimedOut:
-        error_message = "TLE"
-    except Exception as e:
-        error_message = str(e)
-
-    return output, error_message
-
-    import sys
-    from io import StringIO
-    import signal
-    import time
-    import re
-    import matplotlib
-    matplotlib.use('Agg')
-    #code_string = re.sub(r'[\x00-\x1f]', '', code_string)
-
-    #print("Code string:", code_string)
-    #print("Original length of code string", len(code_string))
-
-    # Code string after strip
-    import codecs
-    new_code_string = codecs.decode(code_string, 'unicode_escape')
-    #print("Length of code string after conversion:", len(new_code_string))
-
-    output = None
-    error_message = None
-
-    def timeout_handler(num, stack):
-       print("Received SIGALRM")
-       raise Exception("TLE")
-
-    # Executing the code and capturing the output
-    old_stdout = sys.stdout
-
-    signal.signal(signal.SIGALRM, timeout_handler)
-    signal.alarm(10)
-
-    try:
-        # Redirect stdout and stderr to capture the output and error message
-        sys.stdout = StringIO()
-        
-
-        # Execute the code
-        exec(new_code_string,globals())
-
-        # Get the captured output
-        output = sys.stdout.getvalue()
-
-    except Exception as e:
-        error_message = str(e)
-    
-    # Reset alarm
-    signal.alarm(0)
-
-    # Restore the original stdout and stderr
-    sys.stdout = old_stdout
-   
-
-    return output, error_message   
+    return shared_safe_execute(code_string, keys=keys)
 
 def remove_boxed(s):
     left = "\\boxed{"
@@ -295,6 +200,10 @@ def get_chat_response(context,stop=None,temperature=0.5, max_tokens=5000, n=1, p
     from langchain.schema.messages import HumanMessage, SystemMessage
     import time 
     
+    context = strip_asy_blocks_for_model_input(context)
+    if system_mess is not None:
+        system_mess = strip_asy_blocks_for_model_input(system_mess)
+
     print("----Response starts-----")
     
     if system_mess is not None:
@@ -365,6 +274,7 @@ def code_fixer(error_program,error_message):
         (3) Use of classes or methods without properly importing required libraries like Sympy, math, etc.
         (4) Wrong way of handling mathematical objects specially in the Sympy library, use of invalid operators with class objects.
         (5) Code has an abrupt end, or code contains natural language sentences instead of python syntax.
+        (6) Do not call .evalf() on plain Python ints or floats. Use the numeric value directly, or use N(...) / expr.evalf(...) only for actual SymPy expressions.
 
         """
         

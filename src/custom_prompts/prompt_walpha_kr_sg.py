@@ -178,13 +178,6 @@ Solution:
 - So the new mean would be 50. 
 - Therefore, the answer is A.
 
-Question: John found that the average of 15 numbers is 40. If 10 is added to each number then the mean of the numbers is? Options: ['(A) 50', '(B) 45' , '(C) 65', '(D) 78', '(E) 64' ]
-Modules used till now: []  
-Solution:
-- If 10 is added to each number, then the mean of the numbers also increases by 10. 
-- So the new mean would be 50. 
-- Therefore, the answer is A.
-
 Question: How many keystrokes are needed to type the numbers from 1 to 500? Options:['(A) 1156', '(B) 1392' ,'(C) 1480' ,'(D) 1562', '(E) 1788']
 Modules used till now: []  
 Solution:
@@ -336,7 +329,7 @@ Solution:
 
 
 prompt_GSM_new = """
-Given the question and all the context, compile the solution to the given mathematical problem. You should give concise solutions using the context. Finally, in the last line of Solution write the answer in the format of "the answer is #### [Integer]". For example, "the answer is #### 30","the answer is #### 3" , etc. The final answer is always an integer with only digits and no decimals/commas/fractions . Try to use information from context to compile the solution. 
+Given the question and all the context, compile the solution to the given mathematical problem. You should give concise solutions using the context. End the solution with a final line in the format "Final Answer: [Integer]". For example, "Final Answer: 30" or "Final Answer: 3". The final answer must be an integer with only digits and no decimals, commas, or fractions. Try to use information from context to compile the solution. 
 
 Question: Lisa, Jack, and Tommy earned $60 from washing cars all week. However, half of the $60 was earned by Lisa. Tommy earned half of what Lisa earned. How much more money did Lisa earn than Tommy?
 Modules used till now: ["program_generator","program_executor"]
@@ -356,7 +349,7 @@ Python output:
 Lisa earns 15 more than Tommy
 Solution: 
 - From Python code output, we get that Lisa earns 15 more than Tommy.
-- the answer is #### 15
+- Final Answer: 15
 
 Question: Sam and Jeff had a skipping competition at recess. The competition was split into four rounds. Sam completed 1 more skip than Jeff in the first round. Jeff skipped 3 fewer times than Sam in the second round. Jeff skipped 4 more times than Sam in the third round. Jeff got tired and only completed half the number of skips as Sam in the last round. If Sam skipped 16 times in each round, what is the average number of skips per round completed by Jeff?
 Modules used till now: ["program_generator","program_executor"]
@@ -373,7 +366,7 @@ Python output:
 The average number of skips per round completed by Jeff is  14.0
 Solution: 
 - From Python code output, we get the average number of skips per round completed by Jeff is 14.
-- the answer is #### 14
+- Final Answer: 14
 
 Question: Tim has some cans of soda. Jeff comes by, and takes 6 cans of soda from Tim. Tim then goes and buys another half the amount of soda cans he had left. If Tim has 24 cans of soda in the end, how many cans of soda did Tim have at first?
 Modules used till now: ["program_generator","program_executor"]
@@ -390,7 +383,7 @@ Python output:
 Initial number of soda cans Tim had: 22
 Solution: 
 - From Python code output, we get that the initial number of soda cans Tim is 22.
-- the answer is #### 22
+- Final Answer: 22
 
 
 Question: Sam has 18 cows. 5 more than half the cows are black. How many cows are not black?
@@ -405,7 +398,7 @@ Python output:
 The number of cows not black is  4.0
 Solution: 
 - From Python code output, we get that the number of cows not black is 4.
-- the answer is #### 4
+- Final Answer: 4
 
 Question: In five years Sam will be 3 times as old as Drew. If Drew is currently 12 years old, how old is Sam?
 Modules used till now: ["program_generator","program_executor"]
@@ -420,11 +413,11 @@ Python output:
 Sam is 46 years old
 Solution: 
 - From Python code output, we get Sam is 46 years old.
-- the answer is #### 46
+- Final Answer: 46
 """
 
 prompt_GSM_new_walpha = """
-Given the question, generate the solution to the given mathematical problem. You should give concise solutions using the context. Finally, in the last line of Solution write the answer in the format of "the answer is #### [Integer]". For example, "the answer is #### 30","the answer is #### 3" , etc. The final answer is always an integer with only digits and no decimals/commas/fractions . Try to use information from context to compile the solution. 
+Given the question, generate the solution to the given mathematical problem. You should give concise solutions using the context. End the solution with a final line in the format "Final Answer: [Integer]". For example, "Final Answer: 30" or "Final Answer: 3". The final answer must be an integer with only digits and no decimals, commas, or fractions. Try to use information from context to compile the solution. 
 
 Question: Lisa, Jack, and Tommy earned $60 from washing cars all week. However, half of the $60 was earned by Lisa. Tommy earned half of what Lisa earned. How much more money did Lisa earn than Tommy?
 Modules used till now: ["program_generator","program_executor", 'wolfram_alpha_search']
@@ -447,7 +440,7 @@ Final Query: 60/2 - (60/2)/2
 Wolfram_Alpha response: Lisa earns 15 more than Tommy.
 Solution:
 - From both Python Generator and Wolfram alpha we get the answer as 15.
-- the answer is #### 15
+- Final Answer: 15
 
 
 Question: Sam and Jeff had a skipping competition at recess. The competition was split into four rounds. Sam completed 1 more skip than Jeff in the first round. Jeff skipped 3 fewer times than Sam in the second round. Jeff skipped 4 more times than Sam in the third round. Jeff got tired and only completed half the number of skips as Sam in the last round. If Sam skipped 16 times in each round, what is the average number of skips per round completed by Jeff?
@@ -457,7 +450,7 @@ Final Query: ((16 - 1) + (16 - 3) + (16 + 4) + 16/2)/4
 Wolfram_Alpha response: The answer extracted from Wolfram Alpha is 14.
 Solution:
 - From Wolfram alpha we get the answer as 14.
-- the answer is #### 14
+- Final Answer: 14
 
 Question: Tim has some cans of soda. Jeff comes by, and takes 6 cans of soda from Tim. Tim then goes and buys another half the amount of soda cans he had left. If Tim has 24 cans of soda in the end, how many cans of soda did Tim have at first?
 Modules used till now: ['wolfram_alpha_search']
@@ -466,7 +459,7 @@ Final Query:  x - 6 + (x - 6)/2 == 24
 Wolfram_Alpha response: The answer extracted from Wolfram Alpha is 22.
 Solution:
 - From Wolfram alpha we get the answer as 22.
-- the answer is #### 22
+- Final Answer: 22
 
 Question:  Sam has 18 cows. 5 more than half the cows are black. How many cows are not black?
 Modules used till now: ['wolfram_alpha_search']
@@ -475,7 +468,7 @@ Final Query:  18 - (5 + 18/2)
 Wolfram_Alpha response: The answer extracted from Wolfram Alpha is 4.
 Solution:
 - From Wolfram alpha we get the answer as 4.
-- the answer is #### 4
+- Final Answer: 4
 
 Question: In five years Sam will be 3 times as old as Drew. If Drew is currently 12 years old, how old is Sam?
 Modules used till now: ['wolfram_alpha_search']
@@ -484,12 +477,12 @@ Final Query:  (12 + 5) * 3 - 5
 Wolfram_Alpha response: The answer extracted from Wolfram Alpha is 46.
 Solution:
 - From Wolfram alpha we get the answer as 46.
-- the answer is #### 46
+- Final Answer: 46
 
 """
 
 prompt_GSM_new_sg ="""
-Given the question, generate the solution to the given mathematical problem. In the last line of Solution write the answer in the format of "the answer is #### [Integer]". For example, "the answer is #### 30","the answer is #### 3" , etc. The final answer is always an integer with only digits and no decimals/commas/fractions.
+Given the question, generate the solution to the given mathematical problem. End the solution with a final line in the format "Final Answer: [Integer]". For example, "Final Answer: 30" or "Final Answer: 3". The final answer must be an integer with only digits and no decimals, commas, or fractions.
 
 Question: Lisa, Jack, and Tommy earned $60 from washing cars all week. However, half of the $60 was earned by Lisa. Tommy earned half of what Lisa earned. How much more money did Lisa earn than Tommy?
 Modules used till now: []
@@ -497,7 +490,7 @@ Solution:
 - Lisa earned 60 * 1/2 = 30. 
 - Tommy earned $30 * 1/2 = 15. 
 - Lisa earned $30 - $15 = 15 more than Tommy.
-- the answer is #### 15
+- Final Answer: 15
 
 
 Question: Sam and Jeff had a skipping competition at recess. The competition was split into four rounds. Sam completed 1 more skip than Jeff in the first round. Jeff skipped 3 fewer times than Sam in the second round. Jeff skipped 4 more times than Sam in the third round. Jeff got tired and only completed half the number of skips as Sam in the last round. If Sam skipped 16 times in each round, what is the average number of skips per round completed by Jeff?
@@ -509,7 +502,7 @@ Solution:
 - In round four, Jeff completed 16 / 2 = 8. 
 - Jeff completed 15 + 13 + 20 + 8 = 56 skips in total. 
 - Jeff skipped an average of 56 / 4 = 14 skips per round.
-- the answer is #### 14
+- Final Answer: 14
 
 Question: Tim has some cans of soda. Jeff comes by, and takes 6 cans of soda from Tim. Tim then goes and buys another half the amount of soda cans he had left. If Tim has 24 cans of soda in the end, how many cans of soda did Tim have at first?
 Modules used till now: []
@@ -518,7 +511,7 @@ Solution:
 - After Jeff comes by, Tim has x-6 cans left. 
 - Tim buys another (x-6)/2 cans. 
 - x-6+(x-6)/2=24 2*x-12+x-6=48 3*x-18=48 3*x=66 x=22
-- the answer is #### 22
+- Final Answer: 22
 
 Question:  Sam has 18 cows. 5 more than half the cows are black. How many cows are not black?
 Modules used till now: []
@@ -526,7 +519,7 @@ Solution:
 - Half of the cows: 18/2=9 
 - Black cows: 5+9=>14 
 - 18-14= 4 cows
-- the answer is #### 4
+- Final Answer: 4
 
 Question: In five years Sam will be 3 times as old as Drew. If Drew is currently 12 years old, how old is Sam?
 Modules used till now: []
@@ -534,32 +527,26 @@ Solution:
 - In five years Drew will be 12+5=17 years old.
 - In five years Sam will be 3(17)=51 years old. 
 - Sam is currently 51-5=46 years old.
-- the answer is #### 46
+- Final Answer: 46
 
 """
 
 prompt_GSM = """ 
-Given the question and all the context, compile the solution to the given mathematical problem. You should give concise solutions using the context. Finally, in the last line of Solution write the answer in the format of "the answer is #### [Integer]". For example, "the answer is #### 30","the answer is #### 3" , etc. The final answer is always an integer with only digits and no decimals/commas/fractions . Try to use information from context to compile the solution. 
+Given the question and all the context, compile the solution to the given mathematical problem. You should give concise solutions using the context. End the solution with a final line in the format "Final Answer: [Integer]". For example, "Final Answer: 30" or "Final Answer: 3". The final answer must be an integer with only digits and no decimals, commas, or fractions. Try to use information from context to compile the solution. 
 
 Question: A person is traveling at 20 km/hr and reached his destiny in 2.5 hr then find the distance? 
 Modules used till now: ["program_generator","program_executor"]
 Python Generator:
-# Python Code, print answer.Also Output all the relevant objects in the intermediate steps of the python code. Make sure that the first line of the code is always 'from sympy import *'
 from sympy import *
-# Python Code, print answer, and also output all the relevant objects in the intermediate steps of the python code.
-# Make sure that the first line of the code is always 'from sympy import *'
-from sympy import *
-# Define the variables
 speed = 20  # in km/hr
 time = 2.5  # in hours
-# Distance = Speed * Time
 distance = speed * time
 print("Distance:", distance)
 Python output: 
 Distance:50
 Solution: 
 - From Python code output, we get that the distance is 50 km.
-- the answer is #### 50 
+- Final Answer: 50
 
 
 Question: When the expression $-2x^2-20x-53$ is written in the form $a(x+d)^2+e$, where $a$, $d$, and $e$ are constants, what is the sum $a+d+e$? 
@@ -570,7 +557,7 @@ Solution:
 - From WolframAlpha response, we find -2x^2-20x-53 = -3 - 2 (5 + x)^2.
 - Thus we have a =-2, d = 5, e=-3. 
 - So, a+d+e = 0
-- the answer is #### 0
+- Final Answer: 0
 
 
 Question: What is the least perfect square with 3 different prime factors? 
@@ -584,7 +571,7 @@ Solution:
 - From knowledge retrieval, we get that for the three prime factors,we must select the smallest three which is 2,3,5.
 - Then we can square each prime factor to get the least possible perfect square.
 - From Wolfram alpha we get the value to be 900.
-- the answer is #### 900
+- Final Answer: 900
 
 
 Question: Let $z$ be a complex number such that $|z| = 1.$  Find the maximum value of\n\\[|1 + z| + |1 - z + z^2|.\\]  
@@ -594,7 +581,7 @@ Wolfram_Alpha response: The answer is 3 when z = 1 or z = -1.
 Solution:
 - We call the Wolfram Alpha API to maximize [|1 + z| + |1 - z + z^2| subject to |z| = 1.
 - From Wolfram alpha we get the maximum value as 3.
-- the answer is #### 3
+- Final Answer: 3
 
 
 Question: What is the sum of all the distinct positive two-digit factors of 144? 
@@ -615,7 +602,7 @@ Solution:
 - From Wolfram alpha We find all distinct factors of 144.
 - We get the factors are {1, 2, 3, 4, 6, 8, 9, 12, 16, 18, 24, 36, 48, 72, 144}.
 - From python code we find the sum of {12,16,18,24,36,48,72} which is found to be 226.
-- the answer is #### 226
+- Final Answer: 226
 
 
 Question: A circle is circumscribed about an equilateral triangle with side lengths of $6$ units each.  What is the area of the circle, in square units? Express your answer in terms of $\\pi$. 
@@ -634,14 +621,12 @@ Solution:
 - From Wolfram Alpha, we get the circumradius r of an equilateral triange of side a is a/sqrt(3).
 - Hence, the circumradius is 6/sqrt(3).
 - From python code we find that the area of the circumcirle is pi* r^2 = pi * 12
-- the answer is #### 12
+- Final Answer: 12
 
 
 Question: Mark has a garden with flowers. He planted plants of three different colors in it. Ten of them are yellow, and there are 80% more of those in purple. There are only 25% as many green flowers as there are yellow and purple flowers. How many flowers does Mark have in his garden?
 Modules used till now: ["program_generator","program_executor"]
 Python generator:
-Python Code, print answer, and also output all the relevant objects in the intermediate steps of the python code.
-Make sure that the first line of the code is always 'from sympy import *'
 from sympy import *
 yellow = 10
 purple = yellow + 0.8 * yellow
@@ -652,12 +637,12 @@ Python output:
 Total Flowers: 35
 Solution:
 - From Python code we get the total number of flowers is 35.
-- the answer is #### 35 
+- Final Answer: 35
 
 """
 
 prompt_MMLU = """ 
-Given the question, answer choices (Option A, Option B, Option C, Option D) and all the context, compile the solution to the given mathematical problem. You should give concise solutions using the context. Pick one of the options A,B, C or D as the final answer. If the solution is not in any options, reason using the options. In the last line of Solution write the final option selected in the format of "the answer is #### [Option]". For example, "the answer is #### B","the answer is #### D" , etc. Try to use information from context to compile the solution. 
+Given the question, answer choices (Option A, Option B, Option C, Option D) and all the context, compile the solution to the given mathematical problem. You should give concise solutions using the context. Pick one of the options A, B, C, or D as the final answer. If the solution is not in any options, reason using the options. End the solution with a final line in the format "Final Answer: [Option]". For example, "Final Answer: B" or "Final Answer: D". Try to use information from context to compile the solution. 
 
 Question: A person is traveling at 20 km/hr and reached his destiny in 2.5 hr then find the distance? 
 Option A: 16 
@@ -681,7 +666,7 @@ Python output:
 Distance:50
 Solution: 
 - From Python code output, we get that the distance is 50 km.
-- the answer is #### B
+- Final Answer: B
 
 
 Question: When the expression $-2x^2-20x-53$ is written in the form $a(x+d)^2+e$, where $a$, $d$, and $e$ are constants, what is the sum $a+d+e$? 
@@ -696,7 +681,7 @@ Solution:
 - From WolframAlpha response, we find -2x^2-20x-53 = -3 - 2 (5 + x)^2.
 - Thus we have a =-2, d = 5, e=-3. 
 - So, a+d+e = 0
-- the answer is #### C
+- Final Answer: C
 
 
 Question: What is the least perfect square with 3 different prime factors? 
@@ -714,7 +699,7 @@ Solution:
 - From knowledge retrieval, we get that for the three prime factors,we must select the smallest three which is 2,3,5.
 - Then we can square each prime factor to get the least possible perfect square.
 - From Wolfram alpha we get the value to be 900.
-- the answer is #### D
+- Final Answer: D
 
 
 Question: Let $z$ be a complex number such that $|z| = 1.$  Find the maximum value of\n\\[|1 + z| + |1 - z + z^2|.\\]
@@ -728,7 +713,7 @@ Wolfram_Alpha response: The answer is 3 when z = 1 or z = -1.
 Solution:
 - We call the Wolfram Alpha API to maximize [|1 + z| + |1 - z + z^2| subject to |z| = 1.
 - From Wolfram alpha we get the maximum value as 3.
-- the answer is #### A
+- Final Answer: A
 
 
 Question: What is the sum of all the distinct positive two-digit factors of 144? 
@@ -753,7 +738,7 @@ Solution:
 - From Wolfram alpha We find all distinct factors of 144.
 - We get the factors are {1, 2, 3, 4, 6, 8, 9, 12, 16, 18, 24, 36, 48, 72, 144}.
 - From python code we find the sum of {12,16,18,24,36,48,72} which is found to be 226.
-- the answer is #### B
+- Final Answer: B
 
 
 Question: A circle is circumscribed about an equilateral triangle with side lengths of $6$ units each.  What is the area of the circle, in square units? Express your answer in terms of $\\pi$. 
@@ -776,7 +761,7 @@ Solution:
 - From Wolfram Alpha, we get the circumradius r of an equilateral triange of side a is a/sqrt(3).
 - Hence, the circumradius is 6/sqrt(3).
 - From python code we find that the area of the circumcirle is pi* r^2 = pi * 12
-- the answer is #### D
+- Final Answer: D
 
 
 Question: Mark has a garden with flowers. He planted plants of three different colors in it. Ten of them are yellow, and there are 80% more of those in purple. There are only 25% as many green flowers as there are yellow and purple flowers. How many flowers does Mark have in his garden?
@@ -798,6 +783,6 @@ Python output:
 Total Flowers: 35
 Solution:
 - From Python code we get the total number of flowers is 35.
-- the answer is #### C
+- Final Answer: C
 
 """

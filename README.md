@@ -41,6 +41,16 @@ Example, run the following command to start run on MATH dataset for the setting 
 python run.py --dataset 'MATH' --model 'pg_walpha_sg' --label 'pg_walpha_sg_results' --debug  
 ````
 
+To run the combined Knowledge Retrieval + Program + Wolfram + Solution pipeline, use:
+```
+python run.py --dataset 'MATH' --model 'kr_pg_walpha_sg' --label 'kr_pg_walpha_sg_results' --debug
+```
+
+For mixed runs across all datasets, `--dataset ALL` now defaults to a random dataset-balanced strategy, so selection stays random without being dominated by the much larger MATH split. To reproduce the old size-proportional behavior, pass:
+```
+python run.py --dataset 'ALL' --mixed_dataset_strategy 'proportional'
+```
+
 Each run now also generates a standalone HTML report beside the JSON/JSONL outputs, so you can review or present results in a browser instead of reading raw terminal logs.
 
 ### Render a presentation report from an existing output file
