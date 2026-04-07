@@ -197,7 +197,8 @@ def build_option_solution_demo_prompt(option_letters):
         "- For closest, nearest, approximate, or estimate questions, compute the target quantity first, then compare every option numerically and choose the smallest difference.\n"
         "- If the options are expressions, evaluate those expressions before choosing the letter.\n"
         "- Do not assume a rounding rule unless the options clearly support it.\n"
-        f'- End with exactly one final line in the form "The answer is [LETTER]" using one of {option_letters}.\n'
+        f'- End with exactly one final line in the form "Final Answer: [LETTER]. [OPTION TEXT]" using one of {option_letters}.\n'
+        "- Copy the chosen option text exactly, so the final line includes both the option letter and its value.\n"
     )
 
 

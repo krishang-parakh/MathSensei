@@ -3,56 +3,22 @@ import json
 import requests
 
 import os
-import openai
 
-from dotenv import load_dotenv
-load_dotenv(".env")
+from core.env_loader import load_dotenv
+load_dotenv(os.path.join(os.path.dirname(__file__), ".env"), override=True)
 
-import langchain 
 import time
 import random
-import func_timeout
-import numpy as np
 import logging
 from typing import Union, Any
 from math import isclose
 from tqdm import tqdm
 
-# Import Langchain libraries
-from langchain import LLMChain
-from langchain.chat_models import AzureChatOpenAI
-from langchain.prompts.chat import (
-    ChatPromptTemplate,
-    SystemMessagePromptTemplate,
-    HumanMessagePromptTemplate,
-)
-
-from langchain.schema import (
-    AIMessage,
-    HumanMessage,
-    SystemMessage
-)
-
-openai.api_type =  "azure"
-openai.api_base = os.environ['OPENAI_API_BASE']
-openai.api_version = os.environ['OPENAI_API_VERSION']
-openai.api_key = os.environ['OPENAI_API_KEY']
-openai.deployment_name = os.environ["OPENAI_DEPLOYMENT_NAME"]
-openai.model_name = os.environ['MODEL_NAME']
-
-
-# Initiate a connection to the LLM from Azure OpenAI Service via LangChain.
-llm = AzureChatOpenAI(
-    openai_api_key=openai.api_key,
-    deployment_name=openai.deployment_name ,
-    openai_api_version = openai.api_version,
-    openai_api_base = openai.api_base ,
-    model_name = openai.model_name, 
-    temperature=0.5
-)
-
 # Wolfram Alpha
-import wolframalpha
+try:
+    import wolframalpha
+except Exception:
+    wolframalpha = None
 
 # Import prompts
 from custom_prompts.react_prompt_library import (
@@ -65,6 +31,7 @@ from custom_prompts.react_prompt_library import (
     prompts_TC_REACT,
 )
 from custom_prompts.core_prompts import prompt_codefixer
+from utilities import get_chat_response as shared_get_chat_response
 from utilities import safe_execute as shared_safe_execute
 from presentation.asy_rendering import strip_asy_blocks_for_model_input
 
@@ -195,48 +162,39 @@ def last_boxed_only_string(string):
     
     return retval
 
-def get_chat_response(context,stop=None,temperature=0.5, max_tokens=5000, n=1, patience=10, sleep_time=0,system_mess=None):
-    
-    from langchain.schema.messages import HumanMessage, SystemMessage
-    import time 
-    
+def get_chat_response(context,stop=None,temperature=0.5, max_tokens=5000, n=1, patience=1, sleep_time=0,system_mess=None):
+
+    import time
+
     context = strip_asy_blocks_for_model_input(context)
     if system_mess is not None:
         system_mess = strip_asy_blocks_for_model_input(system_mess)
 
     print("----Response starts-----")
-    
+
+    messages = []
     if system_mess is not None:
-        try:
-            if stop!=None:
-                response = llm([SystemMessage(content=system_mess),HumanMessage(content=context)],max_tokens=max_tokens,temperature=temperature,stop=stop)
-            else:
-                response = llm([SystemMessage(content=system_mess),HumanMessage(content=context)],max_tokens=max_tokens,temperature=temperature)
+        messages.append({"role": "system", "content": system_mess})
+    messages.append({"role": "user", "content": context})
 
+    try:
+        response = shared_get_chat_response(
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            patience=patience,
+            sleep_time=0,
+        )
+    except Exception:
+        response = ""
 
-        except:
-            response = ""
-    
-    else:
-        
-        try:
-            if stop!=None:
-                response = llm([HumanMessage(content=context)],max_tokens=max_tokens,temperature=temperature,stop=stop)
-            else:
-                response = llm([HumanMessage(content=context)],max_tokens=max_tokens,temperature=temperature)
-
-
-        except:
-            response = ""
-
-     
     print("----Response ends-----")
 
     try:
       print("---------Sleep starts----------")
       time.sleep(sleep_time)
       print("---------Sleep ends----------")
-      return response.content
+      return response
     
     except:
       print("---------Sleep starts----------")
@@ -420,11 +378,17 @@ def wolframalpha_generator(question,context):
                 continue
             
             else:
-                
                 print("In API Call")
 
                 # Call the API
-                app_id = os.environ['WOLFRAM_ALPHA_APPID']
+                app_id = os.environ.get('WOLFRAM_ALPHA_APPID')
+                if not app_id:
+                    print("Error: WOLFRAM_ALPHA_APPID not set")
+                    continue
+                
+                if wolframalpha is None:
+                    print("Error: wolframalpha not installed")
+                    continue
                 
                 client = wolframalpha.Client(app_id)
                 
@@ -436,21 +400,17 @@ def wolframalpha_generator(question,context):
                 try: 
                     print(q)
                     res = client.query(q)
-                    print("WA: q =",q)
-                    print("WA res=",res)
-                except:
-                    print("Error 403")
-                    continue   
+                    print("WA: q =", q)
+                    print("WA res=", res)
+                except Exception as exc:
+                    print(f"Wolfram Alpha error: {exc}")
+                    continue
               
-                
-                # Got res
-                if res['@success'] == True:
-                    answer_walpha = call_answer_cleaner(q,res)
-                    #print(answer_walpha)
+                if res and res.get('@success') == True:
+                    answer_walpha = call_answer_cleaner(q, res)
                     break
                 else:
-                    print(f"\nSuccess is False {str(tries)}")
-                    answer_walpha = None
+                    print(f"Wolfram Alpha: success is False")
                     continue
                    
                 

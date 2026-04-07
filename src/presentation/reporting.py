@@ -9,26 +9,23 @@ from collections import Counter
 from html import escape
 
 from core.answer_parsing import (
-    candidate_has_rejection_cue,
-    extract_answer_candidates,
-    extract_final_answer_option_letter,
-    extract_preferred_answer,
     extract_tagged_answer,
+)
+from core.answer_resolution import (
+    format_option_answer,
+    resolve_final_answer_bundle,
+    resolve_gold_answer_bundle,
+    uses_option_answers,
 )
 from presentation.asy_rendering import render_asy_block_html, split_asy_blocks
 from presentation.benchmarking import (
-    _extract_gsm_number,
     _extract_option_letter,
-    _latex_to_sympy_expression,
     _normalize_math_text,
-    _normalize_numeric_candidate,
-    _resolve_option_value,
-    answers_match,
-    dataset_label,
+    _latex_to_sympy_expression,
     evaluate_record,
+    answers_match,
     summarize_accuracy,
 )
-from core.option_reasoning import select_option_from_values
 
 try:
     from sympy import latex as sympy_latex
@@ -570,182 +567,9 @@ def infer_dataset(records=None, source_path=None, title=None):
     return "UNKNOWN"
 
 
-def extract_boxed_text(text):
-    if not text:
-        return None
-
-    marker = "\\boxed{"
-    start = text.rfind(marker)
-    if start == -1:
-        return None
-
-    idx = start + len(marker)
-    depth = 1
-    collected = []
-
-    while idx < len(text):
-        char = text[idx]
-        if char == "{":
-            depth += 1
-        elif char == "}":
-            depth -= 1
-            if depth == 0:
-                return "".join(collected).strip()
-        collected.append(char)
-        idx += 1
-
-    return None
-
-
-def _format_option_answer(record, option_key):
-    if not option_key:
-        return None
-
-    normalized_key = str(option_key).strip().upper()
-    for option in record.get("options") or []:
-        if str(option.get("key", "")).strip().upper() == normalized_key:
-            label = clean_display_text(option.get("label") or "").strip()
-            return f"{normalized_key}. {label}" if label else normalized_key
-    return normalized_key
-
-
-def _record_uses_option_answers(record):
-    dataset = str(record.get("dataset") or "").upper()
-    return bool(record.get("options")) or dataset in {"AQUA", "MMLU"}
-
-
-def _is_bare_option_reference(text):
-    cleaned = clean_display_text(text)
-    if not cleaned:
-        return False
-
-    stripped = cleaned.replace("**", "").replace("__", "").replace("`", "").strip().rstrip(".")
-    if not stripped:
-        return False
-
-    patterns = [
-        r"^(?:option\s+)?[A-E]$",
-        r"^(?:final answer|the correct answer is|the answer is|answer)\s*:?\s*[A-E]$",
-    ]
-    return any(re.fullmatch(pattern, stripped, flags=re.IGNORECASE) for pattern in patterns)
-
-
-def _format_option_answer_for_value(record, option_value):
-    normalized_value = clean_display_text(option_value)
-    if not normalized_value:
-        return None
-
-    normalized_numeric = _normalize_numeric_candidate(_extract_gsm_number(normalized_value) or normalized_value)
-    for option in record.get("options") or []:
-        key = clean_display_text(option.get("key"))
-        label = clean_display_text(option.get("label"))
-        if not key or not label:
-            continue
-        if label == normalized_value:
-            return _format_option_answer(record, key)
-        option_numeric = _normalize_numeric_candidate(_extract_gsm_number(label) or label)
-        if normalized_numeric is not None and option_numeric is not None and normalized_numeric == option_numeric:
-            return _format_option_answer(record, key)
-    return None
-
-
-def _resolved_option_answer_from_text(record, text, *, prefer_value_only=False):
-    strong_final_option = extract_final_answer_option_letter(text)
-    if strong_final_option:
-        formatted = _format_option_answer(record, strong_final_option)
-        if formatted:
-            return formatted
-
-    fallback = None
-
-    for candidate in extract_answer_candidates(text):
-        if candidate_has_rejection_cue(candidate):
-            continue
-        resolved_value = _resolve_option_value(candidate, record.get("options"))
-        if not resolved_value:
-            continue
-        formatted = _format_option_answer_for_value(record, resolved_value)
-        if not formatted:
-            continue
-        if not _is_bare_option_reference(candidate):
-            return formatted
-        if fallback is None:
-            fallback = formatted
-
-    if prefer_value_only:
-        return None
-    return fallback
-
-
 def infer_final_answer(record):
-    explicit = record.get("final_answer") or record.get("answer")
-    solution = record.get("final_generated_solution") or record.get("solution")
-    if _record_uses_option_answers(record):
-        for text in (solution, explicit):
-            strong_final_option = extract_final_answer_option_letter(text)
-            if strong_final_option:
-                formatted = _format_option_answer(record, strong_final_option)
-                if formatted:
-                    return formatted
-        for text in (solution, explicit):
-            resolved = _resolved_option_answer_from_text(record, text, prefer_value_only=True)
-            if resolved:
-                return resolved
-        for text in (explicit, solution):
-            resolved = _resolved_option_answer_from_text(record, text, prefer_value_only=False)
-            if resolved:
-                return resolved
-        resolved_choice = select_option_from_values(
-            [
-                solution,
-                explicit,
-                record.get("program_output") or record.get("program_executor:output"),
-                record.get("wolfram_output") or record.get("wolfram_alpha_search:output"),
-            ],
-            record.get("options"),
-            question_text=record.get("problem") or record.get("question"),
-        )
-        if resolved_choice:
-            formatted = _format_option_answer(record, resolved_choice.get("key"))
-            if formatted:
-                return formatted
-
-    if explicit:
-        explicit_text = clean_display_text(explicit).strip()
-        preferred_answer = extract_preferred_answer(explicit_text)
-        if preferred_answer:
-            return preferred_answer
-        return explicit_text
-
-    boxed = extract_boxed_text(solution)
-    if boxed:
-        return clean_display_text(boxed)
-
-    if solution:
-        solution_text = clean_display_text(solution)
-        preferred_answer = extract_preferred_answer(solution_text)
-        if preferred_answer:
-            return preferred_answer
-
-    if solution:
-        lines = [line.strip("- ").strip() for line in clean_display_text(solution).splitlines() if line.strip()]
-        for line in reversed(lines):
-            lowered = line.lower()
-            if "final answer" in lowered or "therefore" in lowered:
-                return line
-        if lines:
-            return lines[-1]
-
-    program_output = record.get("program_output") or record.get("program_executor:output")
-    if program_output:
-        preferred_answer = extract_preferred_answer(clean_display_text(program_output))
-        if preferred_answer:
-            return preferred_answer
-        lines = [line.strip() for line in clean_display_text(program_output).splitlines() if line.strip()]
-        if lines:
-            return lines[-1]
-
-    return None
+    resolved = resolve_final_answer_bundle(record)
+    return resolved.get("display")
 
 
 def infer_correct_option(text):
@@ -982,13 +806,22 @@ def normalize_record(record):
     normalized["dataset"] = normalized.get("dataset") or infer_dataset(records=[normalized])
     if normalized["dataset"] in (None, "", "UNKNOWN"):
         normalized["dataset"] = "Unknown"
-    if _record_uses_option_answers(normalized):
-        normalized["correct_option"] = clean_display_text(normalized.get("correct_option")) or infer_correct_option(normalized.get("gold_answer")) or infer_correct_option(normalized.get("ground_truth_solution"))
-    else:
-        normalized["correct_option"] = None
-    normalized["final_answer"] = infer_final_answer(normalized)
     evaluation = evaluate_record(normalized)
     normalized.update(evaluation)
+    normalized["final_answer"] = evaluation.get("predicted_answer_display")
+    normalized["final_answer_value"] = evaluation.get("predicted_answer")
+    normalized["final_answer_option"] = evaluation.get("predicted_answer_option")
+    normalized["gold_answer"] = evaluation.get("gold_answer")
+    normalized["gold_answer_display"] = evaluation.get("gold_answer_display") or evaluation.get("gold_answer")
+    if uses_option_answers(normalized):
+        normalized["correct_option"] = (
+            evaluation.get("gold_answer_option")
+            or clean_display_text(normalized.get("correct_option"))
+            or infer_correct_option(normalized.get("gold_answer"))
+            or infer_correct_option(normalized.get("ground_truth_solution"))
+        )
+    else:
+        normalized["correct_option"] = None
     normalized["method_evaluations"] = _build_method_evaluations(normalized)
     normalized.update(_overall_method_evaluation(normalized))
     normalized["status"] = classify_record(normalized)
@@ -997,25 +830,11 @@ def normalize_record(record):
 
 
 def classify_record(record):
-    program_error = (record.get("program_error") or "").strip()
-    if program_error:
-        return "needs-review"
-
-    lowered = " ".join(
-        str(record.get(field) or "").lower()
-        for field in ("wolfram_output", "final_generated_solution", "program_output")
-    )
-    if "execution failed" in lowered or "cannot handle query" in lowered or "traceback" in lowered:
-        return "needs-review"
-
     overall_label = record.get("overall_evaluation_label")
     if overall_label == "Correct":
         return "complete"
     if overall_label == "Incorrect":
         return "incorrect-evaluation"
-    if overall_label == "Incomplete Evaluation":
-        return "incomplete-evaluation"
-
     return "needs-review"
 
 
@@ -1083,7 +902,17 @@ METHOD_SOURCE_MAP = {
 METHOD_STATUS_META = {
     "correct": {"label": "Correct", "symbol": "&#10003;"},
     "incorrect": {"label": "Incorrect", "symbol": "&#10007;"},
+    "error": {"label": "Error", "symbol": "!"},
     "incomplete": {"label": "Incomplete", "symbol": "&middot;"},
+}
+
+METHOD_FILTER_STATUS_ORDER = ["flagged", "incorrect", "error", "incomplete", "correct"]
+METHOD_FILTER_OPTION_LABELS = {
+    "flagged": "Flagged",
+    "incorrect": "Incorrect",
+    "error": "Error",
+    "incomplete": "Incomplete",
+    "correct": "Correct",
 }
 
 
@@ -1098,6 +927,52 @@ def _evaluate_candidate_answer(record, candidate_answer):
         "options": record.get("options"),
     }
     return evaluate_record(synthetic_record)
+
+
+def _method_filter_slug(label):
+    return re.sub(r"[^a-z0-9]+", "-", str(label or "").strip().lower()).strip("-")
+
+
+def _method_filter_attr_name(label):
+    return f"data-{_method_filter_slug(label)}-status"
+
+
+def _method_error_text(record, label):
+    direct_error_map = {
+        "Solution Generator": [
+            record.get("solution_generator_error"),
+        ],
+        "Python": [
+            record.get("program_error"),
+        ],
+        "Wolfram": [
+            record.get("wolfram_error"),
+        ],
+        "Knowledge": [
+            record.get("knowledge_retrieval_error"),
+        ],
+    }
+
+    for value in direct_error_map.get(label, []):
+        cleaned = clean_display_text(value)
+        if cleaned:
+            return cleaned
+
+    module_error_prefixes = {
+        "Solution Generator": ("solution_generator",),
+        "Python": ("program_generator", "python_generator_refine_executor", "program_executor"),
+        "Wolfram": ("wolfram_alpha_search",),
+        "Knowledge": ("knowledge_retrieval",),
+    }
+    for error in record.get("module_errors") or []:
+        cleaned = clean_display_text(error)
+        if not cleaned:
+            continue
+        lowered = cleaned.lower()
+        if any(prefix in lowered for prefix in module_error_prefixes.get(label, ())):
+            return cleaned
+
+    return None
 
 
 def _method_is_relevant(record, label):
@@ -1118,18 +993,23 @@ def _build_method_evaluations(record):
 
         candidate_answer = answer_candidates.get(label)
         evaluation = _evaluate_candidate_answer(record, candidate_answer) if candidate_answer not in (None, "") else None
-        if evaluation and evaluation.get("evaluation_status") == "evaluated" and evaluation.get("is_correct") is not None:
+        error_text = _method_error_text(record, label)
+        if error_text:
+            status = "error"
+        elif evaluation and evaluation.get("evaluation_status") == "evaluated" and evaluation.get("is_correct") is not None:
             status = "correct" if evaluation.get("is_correct") else "incorrect"
         else:
             status = "incomplete"
 
         display_answer = None
         if evaluation:
-            display_answer = evaluation.get("predicted_answer") or candidate_answer
+            display_answer = evaluation.get("predicted_answer_display") or evaluation.get("predicted_answer")
         if display_answer in (None, ""):
             display_answer = candidate_answer
         if display_answer in (None, ""):
             display_answer = "No answer extracted"
+        if status == "error" and display_answer == "No answer extracted":
+            display_answer = error_text
 
         evaluations.append(
             {
@@ -1140,6 +1020,7 @@ def _build_method_evaluations(record):
                 "answer": clean_display_text(display_answer),
                 "is_correct": evaluation.get("is_correct") if evaluation else None,
                 "evaluation_status": evaluation.get("evaluation_status") if evaluation else "not-evaluated",
+                "has_error": bool(error_text),
             }
         )
 
@@ -1149,15 +1030,15 @@ def _build_method_evaluations(record):
 def _overall_method_evaluation(record):
     if not record.get("final_answer"):
         return {
-            "overall_evaluation_label": "No Answer",
+            "overall_evaluation_label": "Needs Review",
             "overall_evaluation_status": "not-evaluated",
             "overall_is_correct": None,
         }
 
     if record.get("evaluation_status") != "evaluated" or record.get("is_correct") is None:
         return {
-            "overall_evaluation_label": "Incomplete Evaluation",
-            "overall_evaluation_status": "incomplete",
+            "overall_evaluation_label": "Needs Review",
+            "overall_evaluation_status": "not-evaluated",
             "overall_is_correct": None,
         }
 
@@ -1181,6 +1062,9 @@ def summarize_method_accuracy(records):
         available = 0
         evaluated = 0
         correct = 0
+        incorrect = 0
+        error = 0
+        incomplete = 0
 
         for record in records:
             method_rows = {row["label"]: row for row in (record.get("method_evaluations") or [])}
@@ -1188,10 +1072,17 @@ def summarize_method_accuracy(records):
             if not row:
                 continue
             available += 1
+            status = row.get("status")
+            if status == "correct":
+                correct += 1
+            elif status == "incorrect":
+                incorrect += 1
+            elif status == "error":
+                error += 1
+            else:
+                incomplete += 1
             if row.get("evaluation_status") == "evaluated" and row.get("is_correct") is not None:
                 evaluated += 1
-                if row.get("is_correct"):
-                    correct += 1
 
         if available == 0:
             continue
@@ -1202,6 +1093,10 @@ def summarize_method_accuracy(records):
                 "available": available,
                 "evaluated": evaluated,
                 "correct": correct,
+                "incorrect": incorrect,
+                "error": error,
+                "incomplete": incomplete,
+                "flagged": incorrect + error + incomplete,
                 "accuracy": (correct / evaluated) if evaluated else None,
             }
         )
@@ -1212,7 +1107,6 @@ def summarize_method_accuracy(records):
 def build_summary(records):
     total = len(records)
     complete = sum(1 for record in records if record["status"] == "complete")
-    incomplete_evaluation = sum(1 for record in records if record["status"] == "incomplete-evaluation")
     needs_review = sum(1 for record in records if record["status"] == "needs-review")
     incorrect_evaluation = sum(1 for record in records if record["status"] == "incorrect-evaluation")
     accuracy = summarize_accuracy(records)
@@ -1225,7 +1119,6 @@ def build_summary(records):
         "total": total,
         "complete": complete,
         "complete_display": f"{complete}/{total}" if total else "0/0",
-        "incomplete_evaluation": incomplete_evaluation,
         "needs_review": needs_review,
         "incorrect_evaluation": incorrect_evaluation,
         "evaluated": accuracy["evaluated"],
@@ -1312,6 +1205,41 @@ def _sort_filter_values(attr, values):
     return sorted(values, key=lambda value: str(value).lower())
 
 
+def _filter_options(values):
+    options = []
+    for value in values:
+        if isinstance(value, dict):
+            option_value = clean_display_text(value.get("value"))
+            option_label = clean_display_text(value.get("label")) or option_value
+        else:
+            option_value = clean_display_text(value)
+            option_label = option_value
+        if option_value in (None, "") or option_label in (None, ""):
+            continue
+        options.append({"value": option_value, "label": option_label})
+    return options
+
+
+def _method_filter_options(records, label):
+    statuses = {
+        row.get("status")
+        for record in records
+        for row in (record.get("method_evaluations") or [])
+        if row.get("label") == label and row.get("status")
+    }
+    if not statuses:
+        return []
+
+    options = []
+    if any(status != "correct" for status in statuses):
+        options.append({"value": "flagged", "label": METHOD_FILTER_OPTION_LABELS["flagged"]})
+    for status in METHOD_FILTER_STATUS_ORDER:
+        if status == "flagged" or status not in statuses:
+            continue
+        options.append({"value": status, "label": METHOD_FILTER_OPTION_LABELS[status]})
+    return options
+
+
 def _compact_review_text(text, prefer_last_line=False, limit=140):
     if text in (None, ""):
         return None
@@ -1383,39 +1311,35 @@ def _needs_review_panel(record):
     """
 
 
-def _answers_match(dataset, left, right):
-    return answers_match(dataset, left, right)
-
-
 def _method_answer_candidates(record):
     options = record.get("options")
+    problem = record.get("problem")
     candidates = []
     source_specs = [
-        ("Solution Generator", {"solution": record.get("solution_generator_output") or record.get("final_generated_solution"), "options": options, "problem": record.get("problem")}),
-        ("Python", {"program_output": record.get("program_output"), "options": options, "problem": record.get("problem")}),
-        ("Wolfram", {"answer": record.get("wolfram_output"), "solution": record.get("wolfram_output"), "options": options, "problem": record.get("problem")}),
-        ("Knowledge", {"solution": record.get("knowledge_retrieval_output"), "options": options, "problem": record.get("problem")}),
+        ("Solution Generator", {"solution": record.get("solution_generator_output") or record.get("final_generated_solution"), "options": options, "problem": problem}),
+        ("Python", {"answer": record.get("program_output"), "options": options, "problem": problem}),
+        ("Wolfram", {"answer": record.get("wolfram_output"), "options": options, "problem": problem}),
     ]
 
     for label, payload in source_specs:
-        text_values = [value for key, value in payload.items() if key != "options" and value not in (None, "")]
-        if not text_values:
-            continue
-        if label == "Knowledge":
-            knowledge_text = payload.get("solution") or payload.get("answer")
-            tagged_answer = extract_tagged_answer(knowledge_text or "")
-            option_answer = infer_correct_option(knowledge_text or "")
-            if tagged_answer:
-                answer = infer_final_answer({"final_answer": tagged_answer, "options": options})
-            elif option_answer and options:
-                answer = _format_option_answer({"options": options}, option_answer)
-            else:
-                lines = [line.strip("- ").strip() for line in clean_display_text(knowledge_text or "").splitlines() if line.strip()]
-                answer = lines[0] if len(lines) == 1 and len(lines[0]) <= 120 else None
-        else:
-            answer = infer_final_answer(payload)
-        if answer not in (None, ""):
+        answer = resolve_final_answer_bundle(payload).get("display")
+        if answer:
             candidates.append((label, answer))
+
+    knowledge_text = record.get("knowledge_retrieval_output")
+    if knowledge_text not in (None, ""):
+        tagged_answer = extract_tagged_answer(knowledge_text or "")
+        option_answer = infer_correct_option(knowledge_text or "")
+        if tagged_answer:
+            answer = resolve_final_answer_bundle({"final_answer": tagged_answer, "options": options, "problem": problem}).get("display")
+        elif option_answer and options:
+            answer = format_option_answer(options, option_answer)
+        else:
+            lines = [line.strip("- ").strip() for line in clean_display_text(knowledge_text or "").splitlines() if line.strip()]
+            short_answer = lines[0] if len(lines) == 1 and len(lines[0]) <= 120 else None
+            answer = resolve_final_answer_bundle({"final_answer": short_answer, "options": options, "problem": problem}).get("display")
+        if answer:
+            candidates.append(("Knowledge", answer))
     return candidates
 
 
@@ -1468,10 +1392,31 @@ def _looks_like_inline_math_fragment(text):
         return True
     if "(" in candidate and ")" in candidate and re.search(r"[A-Za-z0-9]", candidate):
         return True
-    math_markers = ("\\frac", "\\sqrt", "\\boxed", "^", "_", "{", "}", "=", "\\cdot", "\\times", "\\pi", "\\star", "\\ast")
+    math_markers = (
+        "\\frac",
+        "\\sqrt",
+        "\\boxed",
+        "\\cdot",
+        "\\times",
+        "\\pi",
+        "\\star",
+        "\\ast",
+        "\\infty",
+        "\\cup",
+        "\\cap",
+        "\\pm",
+        "\\neq",
+        "\\leq",
+        "\\geq",
+        "^",
+        "_",
+        "{",
+        "}",
+        "=",
+    )
     if any(marker in candidate for marker in math_markers):
         return True
-    if re.fullmatch(r"\\[A-Za-z]+", candidate):
+    if re.search(r"\\[A-Za-z]+", candidate):
         return True
     if candidate in {"*", "+", "-", "=", "<", ">", "\\star", "\\ast", "\\times", "\\div", "\\pm", "\\neq", "\\leq", "\\geq"}:
         return True
@@ -1523,6 +1468,42 @@ def _convert_inline_math_delimiters(text):
     return _restore_currency_fragments(content, protected_currency)
 
 
+def _auto_wrap_math_lines(text):
+    if text is None:
+        return None
+
+    wrapped_lines = []
+    for raw_line in str(text).splitlines():
+        if not raw_line.strip():
+            wrapped_lines.append(raw_line)
+            continue
+
+        if any(token in raw_line for token in ("\\(", "\\)", "\\[", "\\]", "$$")):
+            wrapped_lines.append(raw_line)
+            continue
+
+        stripped = raw_line.strip()
+        prefixed_match = re.match(r"^(\s*(?:[A-Z][\).:]\s+|[^:\n]{1,40}:\s+))(.+?)\s*$", raw_line)
+        if prefixed_match and _looks_like_math(prefixed_match.group(2)):
+            wrapped_lines.append(f"{prefixed_match.group(1)}\\({prefixed_match.group(2).strip()}\\)")
+            continue
+
+        sentence_match = re.match(r"^(\s*.*?\b(?:is|are|equals|equal to)\s+)(.+?)\s*$", raw_line, flags=re.IGNORECASE)
+        if sentence_match and _looks_like_math(sentence_match.group(2)):
+            wrapped_lines.append(f"{sentence_match.group(1)}\\({sentence_match.group(2).strip()}\\)")
+            continue
+
+        if _looks_like_math(stripped):
+            leading = raw_line[: len(raw_line) - len(raw_line.lstrip())]
+            trailing = raw_line[len(raw_line.rstrip()) :]
+            wrapped_lines.append(f"{leading}\\({stripped}\\){trailing}")
+            continue
+
+        wrapped_lines.append(raw_line)
+
+    return "\n".join(wrapped_lines)
+
+
 def _looks_like_math(text):
     if not text:
         return False
@@ -1534,12 +1515,33 @@ def _looks_like_math(text):
     if any(token in candidate for token in ("$", "\\(", "\\)", "\\[", "\\]")):
         return False
 
-    math_markers = ("\\frac", "\\sqrt", "\\boxed", "^", "_", "{", "}", "=", "\\cdot")
+    math_markers = (
+        "\\frac",
+        "\\sqrt",
+        "\\boxed",
+        "\\cdot",
+        "\\times",
+        "\\pi",
+        "\\infty",
+        "\\cup",
+        "\\cap",
+        "\\pm",
+        "\\neq",
+        "\\leq",
+        "\\geq",
+        "^",
+        "_",
+        "{",
+        "}",
+        "=",
+    )
     if any(marker in candidate for marker in math_markers):
+        return True
+    if re.search(r"\\[A-Za-z]+", candidate):
         return True
 
     # Short symbolic answers like [0,1), x+2, 48/95, A, or 3pi.
-    return bool(re.fullmatch(r"[\[\]\(\)\{\}0-9A-Za-z,\.\-+/=*<>≤≥\s]+", candidate)) and len(candidate.split()) <= 4
+    return bool(re.fullmatch(r"[\[\]\(\)\{\}0-9A-Za-z,\.\\\-+/=*<>≤≥\s]+", candidate)) and len(candidate.split()) <= 4
 
 
 def _strip_display_markdown(text):
@@ -1651,8 +1653,10 @@ def _render_plain_text_html(text, wrap_math=False, preserve_breaks=True):
     display_text = _strip_display_markdown(text)
     if not _looks_like_structured_literal_text(display_text):
         display_text = _convert_inline_math_delimiters(display_text)
+        display_text = _auto_wrap_math_lines(display_text)
+    already_wrapped = any(token in str(display_text) for token in ("\\(", "\\)", "\\[", "\\]", "$$"))
     rendered = escape(str(display_text))
-    if wrap_math and _looks_like_math(text):
+    if wrap_math and not already_wrapped and _looks_like_math(display_text):
         rendered = f"\\({rendered}\\)"
     if preserve_breaks:
         return rendered.replace("\n", "<br>")
@@ -1884,9 +1888,10 @@ def _dataset_filter_config(dataset, records):
         configs.append(
             {
                 "id": "datasetFilter",
+                "kind": "base",
                 "label": "Dataset",
-                "attr": "dataset",
-                "options": dataset_options,
+                "attr": "data-dataset",
+                "options": _filter_options(dataset_options),
             }
         )
 
@@ -1894,40 +1899,63 @@ def _dataset_filter_config(dataset, records):
         configs.extend([
             {
                 "id": "typeFilter",
+                "kind": "base",
                 "label": _problem_type_label(dataset),
-                "attr": "type",
-                "options": type_options,
+                "attr": "data-type",
+                "options": _filter_options(type_options),
             },
         ])
     elif dataset == "MMLU":
         configs.extend([
             {
                 "id": "typeFilter",
+                "kind": "base",
                 "label": _problem_type_label(dataset),
-                "attr": "type",
-                "options": type_options,
+                "attr": "data-type",
+                "options": _filter_options(type_options),
             },
         ])
     else:
         configs.extend([
             {
                 "id": "typeFilter",
+                "kind": "base",
                 "label": _problem_type_label(dataset),
-                "attr": "type",
-                "options": type_options,
+                "attr": "data-type",
+                "options": _filter_options(type_options),
             },
         ])
 
     configs.append(
         {
             "id": "levelFilter",
+            "kind": "base",
             "label": "Level",
-            "attr": "level",
-            "options": level_options,
+            "attr": "data-level",
+            "options": _filter_options(level_options),
         }
     )
 
-    return [config for config in configs if len(config["options"]) > 1]
+    for label in METHOD_SCOREBOARD_ORDER:
+        options = _method_filter_options(records, label)
+        if not options:
+            continue
+        configs.append(
+            {
+                "id": f"{_method_filter_slug(label)}Filter",
+                "kind": "method",
+                "label": label,
+                "attr": _method_filter_attr_name(label),
+                "options": options,
+            }
+        )
+
+    return [
+        config
+        for config in configs
+        if (config.get("kind") == "method" and len(config["options"]) > 0)
+        or (config.get("kind") != "method" and len(config["options"]) > 1)
+    ]
 
 
 def _render_option_board(record):
@@ -1961,11 +1989,15 @@ def _render_option_board(record):
 
 
 def _display_gold_answer(record):
-    if record.get("options") and record.get("correct_option"):
-        formatted = _format_option_answer(record, record.get("correct_option"))
-        if formatted:
-            return formatted
-    return record.get("gold_answer")
+    return record.get("gold_answer_display") or resolve_gold_answer_bundle(record).get("display") or record.get("gold_answer")
+
+
+def _flagged_method_labels(record):
+    return [
+        row.get("label")
+        for row in (record.get("method_evaluations") or [])
+        if row.get("status") in {"incorrect", "error", "incomplete"}
+    ]
 
 
 def _evaluation_label(record):
@@ -1981,11 +2013,17 @@ def _evaluation_label(record):
 
 def _evaluation_explanation(record):
     if record.get("status") == "complete":
-        return "All evaluated methods agree on the same answer, and that answer matches the gold answer."
+        flagged_methods = _flagged_method_labels(record)
+        if flagged_methods:
+            return (
+                "The final answer matches the gold answer. "
+                + "Flagged method checks: "
+                + ", ".join(flagged_methods)
+                + "."
+            )
+        return "The final answer matches the gold answer."
     if record.get("status") == "incorrect-evaluation":
         return _incorrect_evaluation_reason(record)
-    if record.get("status") == "incomplete-evaluation":
-        return "One or more methods ran, but at least one method did not produce an answer that could be evaluated against the gold answer."
     if record.get("status") == "needs-review":
         return _needs_review_reason(record)
     if record.get("final_answer"):
@@ -2087,7 +2125,7 @@ def _answer_reveal_block(record):
         evaluation_class = "answer-summary-card--correct"
     elif evaluation == "Incorrect":
         evaluation_class = "answer-summary-card--incorrect"
-    elif evaluation in {"Needs Review", "Incomplete Evaluation"}:
+    elif evaluation == "Needs Review":
         evaluation_class = "answer-summary-card--review"
 
     return f"""
@@ -2136,6 +2174,17 @@ def _workings_reveal_block(detail_blocks):
     """
 
 
+def _method_status_data_attributes(record):
+    attributes = []
+    for row in record.get("method_evaluations") or []:
+        label = clean_display_text(row.get("label"))
+        status = clean_display_text(row.get("status"))
+        if not label or not status:
+            continue
+        attributes.append(f'{_method_filter_attr_name(label)}="{escape(status)}"')
+    return " ".join(attributes)
+
+
 def _record_card(record, context):
     option_board = _render_option_board(record)
 
@@ -2148,9 +2197,12 @@ def _record_card(record, context):
     )
     answer_reveal = _answer_reveal_block(record)
     workings_reveal = _workings_reveal_block(detail_blocks)
+    method_status_attrs = _method_status_data_attributes(record)
+    if method_status_attrs:
+        method_status_attrs = " " + method_status_attrs
 
     return f"""
-    <article class="problem-card" data-status="{record['status']}" data-dataset="{escape(str(record.get('dataset') or 'Unknown'))}" data-type="{escape(record['problem_type'])}" data-level="{escape(record['level'])}">
+    <article class="problem-card" data-status="{record['status']}" data-dataset="{escape(str(record.get('dataset') or 'Unknown'))}" data-type="{escape(record['problem_type'])}" data-level="{escape(record['level'])}"{method_status_attrs}>
       <section class="question-shell">
         <div class="problem-card__eyebrow">Problem {_display_problem_number(record.get('pid'))}</div>
         <div class="problem-card__title">{_render_text_html(record['problem'], preserve_breaks=True)}</div>
@@ -2186,7 +2238,7 @@ def _method_accuracy_scorecard_html(summary):
         <div class="scoreboard-row">
           <div class="scoreboard-row__model">{escape(row['label'])}</div>
           <div class="scoreboard-row__metric">{_format_accuracy_value(row['accuracy'])}</div>
-          <div class="scoreboard-row__meta">{row['correct']} correct / {row['evaluated']} evaluated / {row['available'] - row['evaluated']} incomplete</div>
+          <div class="scoreboard-row__meta">{row['correct']} correct / {row['evaluated']} evaluated / {row['flagged']} flagged</div>
         </div>
         """
         for row in rows
@@ -2207,7 +2259,7 @@ def render_html_report(records, output_path, title, source_path=None, run_benchm
           <label for="{escape(config['id'])}">{escape(config['label'])}</label>
           <select id="{escape(config['id'])}" data-attr="{escape(config['attr'])}">
             <option value="">All {escape(config['label']).lower()}</option>
-            {''.join(f'<option value="{escape(str(option))}">{escape(str(option))}</option>' for option in config['options'])}
+            {''.join(f'<option value="{escape(str(option["value"]))}">{escape(str(option["label"]))}</option>' for option in config['options'])}
           </select>
         </div>
         """
@@ -2223,7 +2275,6 @@ def render_html_report(records, output_path, title, source_path=None, run_benchm
             <option value="">All statuses</option>
             <option value="complete">Complete</option>
             <option value="incorrect-evaluation">Incorrect Evaluation</option>
-            <option value="incomplete-evaluation">Incomplete Evaluation</option>
             <option value="needs-review">Needs Review</option>
           </select>
         </div>
@@ -3201,6 +3252,11 @@ def render_html_report(records, output_path, title, source_path=None, run_benchm
       background: linear-gradient(180deg, rgba(251, 191, 36, 0.09), rgba(255,255,255,0.02));
     }}
 
+    .method-check--error {{
+      border-color: rgba(251, 113, 133, 0.30);
+      background: linear-gradient(180deg, rgba(251, 113, 133, 0.10), rgba(255,255,255,0.02));
+    }}
+
     .method-check--incomplete {{
       border-color: rgba(148, 163, 184, 0.20);
       background: linear-gradient(180deg, rgba(148, 163, 184, 0.06), rgba(255,255,255,0.02));
@@ -3782,22 +3838,17 @@ def render_html_report(records, output_path, title, source_path=None, run_benchm
         <div class="summary-card">
           <span class="label">Complete</span>
           <div class="value">{summary['complete_display']}</div>
-          <div class="caption">Completed / total problems in this run</div>
+          <div class="caption">Final answer matched the gold answer</div>
         </div>
         <div class="summary-card">
           <span class="label">Incorrect Evaluation</span>
           <div class="value">{summary['incorrect_evaluation']}</div>
-          <div class="caption">At least one evaluated method disagreed with the gold answer</div>
-        </div>
-        <div class="summary-card">
-          <span class="label">Incomplete Evaluation</span>
-          <div class="value">{summary['incomplete_evaluation']}</div>
-          <div class="caption">One or more methods ran but did not yield an evaluable answer</div>
+          <div class="caption">Final answer did not match the gold answer</div>
         </div>
         <div class="summary-card">
           <span class="label">Needs Review</span>
           <div class="value">{summary['needs_review']}</div>
-          <div class="caption">Execution or parsing issue detected</div>
+          <div class="caption">No reliable final evaluation could be produced</div>
         </div>
         <div class="summary-card summary-card--scoreboard">
           <span class="label label-with-info">Accuracy Scorecard {_info_tip_html("Each row scores one method by comparing its resolved answer value against the corresponding ground-truth answer using the same dataset-specific evaluator used elsewhere in the report.")}</span>
@@ -3893,7 +3944,11 @@ def render_html_report(records, output_path, title, source_path=None, run_benchm
           const attr = filter.dataset.attr;
           const value = filter.value;
           if (!value) return true;
-          return card.dataset[attr] === value;
+          const cardValue = card.getAttribute(attr) || "";
+          if (value === "flagged") {{
+            return cardValue && cardValue !== "correct";
+          }}
+          return cardValue === value;
         }});
         const visible = matchesQuery && matchesStatus && matchesDatasetFilters;
         card.style.display = visible ? "" : "none";

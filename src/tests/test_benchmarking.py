@@ -122,6 +122,26 @@ class TestBenchmarking(unittest.TestCase):
         self.assertEqual(evaluation["evaluation_status"], "evaluated")
         self.assertTrue(evaluation["is_correct"])
 
+    def test_option_dataset_accepts_formatted_final_answer_line_with_letter_and_value(self):
+        record = {
+            "dataset": "MMLU",
+            "final_generated_solution": "Reasoning here.\nFinal Answer: C. Gamma",
+            "correct_option": "C",
+            "ground_truth_solution": "C",
+            "options": [
+                {"key": "A", "label": "Alpha"},
+                {"key": "B", "label": "Beta"},
+                {"key": "C", "label": "Gamma"},
+                {"key": "D", "label": "Delta"},
+            ],
+        }
+
+        evaluation = evaluate_record(record)
+
+        self.assertEqual(evaluation["evaluation_status"], "evaluated")
+        self.assertTrue(evaluation["is_correct"])
+        self.assertEqual(evaluation["predicted_answer"], "Gamma")
+
     def test_option_dataset_prefers_resolved_value_over_conflicting_bare_letter(self):
         record = {
             "dataset": "AQUA",
@@ -184,6 +204,103 @@ class TestBenchmarking(unittest.TestCase):
                 "B: 6 \u2014 not correct.\n"
                 "C: 7 \u2014 not correct.\n"
                 "D: 8 \u2014 not correct.\n\n"
+                "The answer is A"
+            ),
+            "correct_option": "A",
+            "ground_truth_solution": "A",
+            "options": [
+                {"key": "A", "label": "5"},
+                {"key": "B", "label": "6"},
+                {"key": "C", "label": "7"},
+                {"key": "D", "label": "8"},
+            ],
+        }
+
+        evaluation = evaluate_record(record)
+
+        self.assertEqual(evaluation["evaluation_status"], "evaluated")
+        self.assertTrue(evaluation["is_correct"])
+        self.assertEqual(evaluation["predicted_answer"], "5")
+
+    def test_option_dataset_ignores_trailing_option_list_after_explicit_answer_letter(self):
+        record = {
+            "dataset": "AQUA",
+            "final_generated_solution": (
+                "3000 = 100 * other side\n"
+                "other side = 3000 / 100 = 30 ft\n\n"
+                "Check options:\n"
+                "A) 30 ft\n"
+                "B) 20 ft\n"
+                "C) 10 ft\n"
+                "D) 50 ft\n"
+                "E) 60 ft\n\n"
+                "The answer is A"
+            ),
+            "correct_option": "A",
+            "ground_truth_solution": "Answer : A",
+            "options": [
+                {"key": "A", "label": "30 feet"},
+                {"key": "B", "label": "20 feet"},
+                {"key": "C", "label": "10 feet"},
+                {"key": "D", "label": "50 feet"},
+                {"key": "E", "label": "60 feet"},
+            ],
+        }
+
+        evaluation = evaluate_record(record)
+
+        self.assertEqual(evaluation["evaluation_status"], "evaluated")
+        self.assertTrue(evaluation["is_correct"])
+        self.assertEqual(evaluation["predicted_answer"], "30 feet")
+
+    def test_option_dataset_returns_value_and_display_from_the_same_resolution(self):
+        record = {
+            "dataset": "AQUA",
+            "final_generated_solution": (
+                "3000 = 100 * other side\n"
+                "other side = 3000 / 100 = 30 ft\n\n"
+                "Check options:\n"
+                "A) 30 ft\n"
+                "B) 20 ft\n"
+                "C) 10 ft\n"
+                "D) 50 ft\n"
+                "E) 60 ft\n\n"
+                "The answer is A"
+            ),
+            "correct_option": "A",
+            "ground_truth_solution": "Answer : A",
+            "options": [
+                {"key": "A", "label": "30 feet"},
+                {"key": "B", "label": "20 feet"},
+                {"key": "C", "label": "10 feet"},
+                {"key": "D", "label": "50 feet"},
+                {"key": "E", "label": "60 feet"},
+            ],
+        }
+
+        evaluation = evaluate_record(record)
+
+        self.assertEqual(evaluation["predicted_answer"], "30 feet")
+        self.assertEqual(evaluation["predicted_answer_display"], "A. 30 feet")
+        self.assertEqual(evaluation["gold_answer"], "30 feet")
+        self.assertEqual(evaluation["gold_answer_display"], "A. 30 feet")
+        self.assertEqual(evaluation["predicted_answer_option"], "A")
+        self.assertEqual(evaluation["gold_answer_option"], "A")
+
+    def test_option_dataset_ignores_plain_option_line_that_survives_tail_window(self):
+        record = {
+            "dataset": "MMLU",
+            "final_generated_solution": (
+                "Solve 35 / z = 7\n\n"
+                "Multiply both sides by z\n"
+                "35 = 7z\n\n"
+                "Divide by 7\n"
+                "z = 5\n\n"
+                "Check options:\n"
+                "A: 5 matches the solution\n"
+                "B: 6 not correct\n"
+                "C: 7\n"
+                "D: 8 not correct\n\n"
                 "The answer is A"
             ),
             "correct_option": "A",
@@ -334,6 +451,19 @@ class TestBenchmarking(unittest.TestCase):
 
         self.assertEqual(evaluation["evaluation_status"], "evaluated")
         self.assertTrue(evaluation["is_correct"])
+
+    def test_math_evaluation_accepts_reordered_commutative_factors(self):
+        record = {
+            "dataset": "MATH",
+            "final_answer": "7(x-3)(x+3)",
+            "ground_truth_solution": "Therefore the answer is \\boxed{7(x+3)(x-3)}",
+        }
+
+        evaluation = evaluate_record(record)
+
+        self.assertEqual(evaluation["evaluation_status"], "evaluated")
+        self.assertTrue(evaluation["is_correct"])
+        self.assertEqual(evaluation["evaluation_method"], "math-symbolic")
 
     def test_unknown_dataset_uses_generic_semantic_matching(self):
         record = {

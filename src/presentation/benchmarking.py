@@ -7,19 +7,15 @@ from datetime import datetime
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
 from core.answer_parsing import (
-    candidate_has_rejection_cue,
     extract_answer_candidates,
-    extract_boxed_answer,
-    extract_final_answer_option_letter,
     extract_numeric_answer,
     extract_option_letter,
-    extract_preferred_answer,
     number_words_to_numeric_string,
 )
-from core.option_reasoning import select_option_from_values
+from core.answer_resolution import resolve_final_answer_bundle, resolve_gold_answer_bundle
 
 try:
-    from sympy import N
+    from sympy import N, simplify
     from sympy.parsing.sympy_parser import (
         convert_xor,
         implicit_multiplication_application,
@@ -28,6 +24,7 @@ try:
     )
 except Exception:
     N = None
+    simplify = None
     parse_expr = None
     standard_transformations = ()
     implicit_multiplication_application = None
@@ -50,10 +47,6 @@ def dataset_label(dataset):
 
 def _extract_option_letter(text):
     return extract_option_letter(text)
-
-
-def _extract_boxed_text(text):
-    return extract_boxed_answer(text)
 
 
 def _extract_gsm_number(text):
@@ -376,63 +369,6 @@ def _option_value_for_key(option_key, options):
     return None
 
 
-def _option_key_for_value(option_value, options):
-    normalized_value = clean_benchmark_text(option_value)
-    if not normalized_value:
-        return None
-
-    normalized_text = _normalize_option_text(normalized_value)
-    normalized_numeric = _numeric_value(normalized_value)
-    for key, label in _option_entries(options):
-        if normalized_text == _normalize_option_text(label):
-            return key
-        label_numeric = _numeric_value(label)
-        if normalized_numeric is not None and label_numeric is not None and _numeric_values_equivalent(normalized_value, label):
-            return key
-    return None
-
-
-def _is_bare_option_reference(text):
-    cleaned = clean_benchmark_text(text)
-    if not cleaned:
-        return False
-
-    stripped = cleaned.replace("**", "").replace("__", "").replace("`", "").strip().rstrip(".")
-    if not stripped:
-        return False
-
-    patterns = [
-        r"^(?:option\s+)?[A-E]$",
-        r"^(?:final answer|the correct answer is|the answer is|answer)\s*:?\s*[A-E]$",
-    ]
-    return any(re.fullmatch(pattern, stripped, flags=re.IGNORECASE) for pattern in patterns)
-
-
-def _resolved_option_answer_from_text(text, options, *, prefer_value_only=False):
-    strong_final_option = extract_final_answer_option_letter(text)
-    if strong_final_option and options:
-        resolved = _option_value_for_key(strong_final_option, options)
-        if resolved:
-            return resolved
-
-    fallback = None
-
-    for candidate in _candidate_texts(text):
-        if candidate_has_rejection_cue(candidate):
-            continue
-        resolved = _resolve_option_value(candidate, options)
-        if not resolved or not _option_key_for_value(resolved, options):
-            continue
-        if not _is_bare_option_reference(candidate):
-            return resolved
-        if fallback is None:
-            fallback = resolved
-
-    if prefer_value_only:
-        return None
-    return fallback
-
-
 def _numeric_expression_value(text):
     cleaned = clean_benchmark_text(text)
     if not cleaned or parse_expr is None or N is None:
@@ -471,6 +407,79 @@ def _numeric_expression_value(text):
         return float(N(parsed, 15))
     except Exception:
         return None
+
+
+def _parse_symbolic_math_candidate(text):
+    cleaned = clean_benchmark_text(text)
+    if not cleaned or parse_expr is None:
+        return None
+
+    candidate = re.sub(
+        r"^\s*(?:final answer|the correct answer is|the answer is|answer)\s*:\s*",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    candidate = candidate.strip().strip(".")
+    if not candidate:
+        return None
+
+    candidate = _latex_to_sympy_expression(candidate) or candidate
+    replacements = {
+        "^": "**",
+        "âˆ’": "-",
+        "â€“": "-",
+        "â€”": "-",
+        "Ã—": "*",
+        "Ã·": "/",
+    }
+    for old, new in replacements.items():
+        candidate = candidate.replace(old, new)
+
+    try:
+        transformations = standard_transformations + tuple(
+            transform
+            for transform in (implicit_multiplication_application, convert_xor)
+            if transform is not None
+        )
+        return parse_expr(candidate, transformations=transformations, evaluate=True)
+    except Exception:
+        return None
+
+
+def _symbolic_math_equivalent(left, right):
+    if parse_expr is None:
+        return False
+
+    left_expr = _parse_symbolic_math_candidate(left)
+    right_expr = _parse_symbolic_math_candidate(right)
+    if left_expr is None or right_expr is None:
+        return False
+
+    try:
+        difference = left_expr - right_expr
+    except Exception:
+        difference = None
+
+    if difference is not None:
+        try:
+            if simplify is not None and simplify(difference) == 0:
+                return True
+        except Exception:
+            pass
+        try:
+            if difference.equals(0):
+                return True
+        except Exception:
+            pass
+
+    try:
+        if left_expr.equals(right_expr):
+            return True
+    except Exception:
+        pass
+
+    return False
 
 
 def _semantic_numeric_expression_value(text):
@@ -592,64 +601,6 @@ def _first_candidate(*values):
     return candidates[0] if candidates else None
 
 
-def _predicted_answer_value(record):
-    options = record.get("options")
-    explicit = clean_benchmark_text(record.get("final_answer"))
-    solution = record.get("final_generated_solution")
-
-    if options:
-        for text in (solution, explicit):
-            strong_final_option = extract_final_answer_option_letter(text)
-            if strong_final_option:
-                resolved = _option_value_for_key(strong_final_option, options)
-                if resolved:
-                    return resolved
-        for text in (solution, explicit):
-            resolved = _resolved_option_answer_from_text(text, options, prefer_value_only=True)
-            if resolved:
-                return resolved
-        for text in (explicit, solution):
-            resolved = _resolved_option_answer_from_text(text, options, prefer_value_only=False)
-            if resolved:
-                return resolved
-        resolved_choice = select_option_from_values(
-            [
-                solution,
-                explicit,
-                record.get("program_output") or record.get("program_executor:output"),
-                record.get("wolfram_output") or record.get("wolfram_alpha_search:output"),
-            ],
-            options,
-            question_text=record.get("problem") or record.get("question"),
-        )
-        if resolved_choice:
-            return resolved_choice.get("label")
-
-    if explicit:
-        return explicit
-
-    preferred = extract_preferred_answer(solution)
-    return clean_benchmark_text(preferred)
-
-
-def _gold_answer_value(record):
-    explicit = clean_benchmark_text(record.get("gold_answer"))
-    if explicit:
-        return explicit
-
-    correct_option = clean_benchmark_text(record.get("correct_option"))
-    if correct_option:
-        return correct_option
-
-    gold_solution = clean_benchmark_text(record.get("ground_truth_solution"))
-    boxed = _extract_boxed_text(gold_solution or "")
-    if boxed:
-        return clean_benchmark_text(boxed)
-
-    preferred = extract_preferred_answer(gold_solution)
-    return clean_benchmark_text(preferred)
-
-
 def _math_match_pair(left_values, right_values):
     left_candidates = _candidate_texts(*left_values)
     right_candidates = _candidate_texts(*right_values)
@@ -662,6 +613,11 @@ def _math_match_pair(left_values, right_values):
             right_math = _normalize_math_text(right_candidate)
             if right_math and left_math == right_math:
                 return left_candidate, right_candidate, "math-normalized"
+
+    for left_candidate in left_candidates:
+        for right_candidate in right_candidates:
+            if _symbolic_math_equivalent(left_candidate, right_candidate):
+                return left_candidate, right_candidate, "math-symbolic"
 
     right_numeric_candidates = _numeric_candidates(*right_values)
     for left_candidate, left_numeric in _numeric_candidates(*left_values):
@@ -723,26 +679,33 @@ def answers_match(dataset, left, right, *, options=None):
 
 
 def _math_candidates(record):
-    return _candidate_texts(_gold_answer_value(record))
+    gold = resolve_gold_answer_bundle(record)
+    return _candidate_texts(gold.get("value") or gold.get("display"))
 
 
 def evaluate_record(record):
     dataset = dataset_label(record.get("dataset"))
-    predicted_answer = _predicted_answer_value(record)
-    gold_answer = _gold_answer_value(record)
+    predicted = resolve_final_answer_bundle(record)
+    gold = resolve_gold_answer_bundle(record)
+    predicted_answer = predicted.get("value") or predicted.get("display")
+    gold_answer = gold.get("value") or gold.get("display")
     options = record.get("options")
 
     evaluation = {
         "predicted_answer": predicted_answer,
         "gold_answer": gold_answer,
+        "predicted_answer_display": predicted.get("display") or predicted_answer,
+        "gold_answer_display": gold.get("display") or gold_answer,
+        "predicted_answer_option": predicted.get("option_key"),
+        "gold_answer_option": gold.get("option_key"),
         "evaluation_status": "not-evaluated",
         "is_correct": None,
         "evaluation_method": None,
     }
 
     if dataset in {"AQUA", "MMLU"}:
-        predicted_values = _resolved_option_candidates([predicted_answer], options)
-        gold_values = _resolved_option_candidates([gold_answer], options)
+        predicted_values = _resolved_option_candidates([evaluation["predicted_answer_display"] or predicted_answer], options)
+        gold_values = _resolved_option_candidates([evaluation["gold_answer_display"] or gold_answer], options)
         evaluation["predicted_answer"] = predicted_values[0][1] if predicted_values else (_first_candidate(predicted_answer) or predicted_answer)
         evaluation["gold_answer"] = gold_values[0][1] if gold_values else (_first_candidate(gold_answer) or gold_answer)
         evaluation["evaluation_method"] = "option-value" if options else "option-letter"

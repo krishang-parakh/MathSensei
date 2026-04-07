@@ -1,8 +1,10 @@
 import logging
+import os
 import re
 import time
 import unicodedata
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse
 
 import requests
 try:
@@ -18,6 +20,14 @@ except Exception:
 
 WOLFRAM_QUERY_URL = "https://api.wolframalpha.com/v2/query"
 WOLFRAM_RESULT_URL = "https://api.wolframalpha.com/v1/result"
+_PROXY_ENV_NAMES = (
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+)
 
 SHORT_ANSWER_FAILURE_MARKERS = (
     "did not understand your input",
@@ -48,6 +58,26 @@ _UNIT_AFTER_NUMBER_RE = re.compile(
     r"(?:\s+[A-Za-z][A-Za-z0-9]*(?:/[A-Za-z][A-Za-z0-9]*)*)*)"
     r"(?=\s*(?:[+\-*/^(),]|$))"
 )
+
+
+def _looks_like_broken_loopback_proxy(proxy_url: Optional[str]) -> bool:
+    if proxy_url in (None, ""):
+        return False
+
+    try:
+        parsed = urlparse(str(proxy_url).strip())
+    except Exception:
+        return False
+
+    host = (parsed.hostname or "").strip().lower()
+    port = parsed.port
+    if host not in {"127.0.0.1", "localhost", "::1", "0.0.0.0"}:
+        return False
+    return port == 9
+
+
+def _should_bypass_env_proxies() -> bool:
+    return any(_looks_like_broken_loopback_proxy(os.getenv(name)) for name in _PROXY_ENV_NAMES)
 
 
 def clean_wolfram_query(query: Optional[str]) -> Optional[str]:
@@ -268,6 +298,7 @@ def query_wolfram_alpha(
         }
 
     session = requests.Session()
+    session.trust_env = not _should_bypass_env_proxies()
     last_error: Optional[str] = None
 
     try:
@@ -322,7 +353,7 @@ def query_wolfram_alpha(
         session.close()
 
     return {
-        "query": candidates[0],
+        "query": candidates[0] if candidates else None,
         "result": None,
         "answer": None,
         "source": None,

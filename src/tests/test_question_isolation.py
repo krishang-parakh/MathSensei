@@ -46,6 +46,8 @@ class TestQuestionIsolation(unittest.TestCase):
         self.assertIn("do not round first and compare later", build_option_program_demo_prompt("A-E"))
         self.assertIn("each option before printing the final letter", build_option_program_demo_prompt("A-E"))
         self.assertIn("reverse-check the final choice", build_option_solution_demo_prompt("A-E"))
+        self.assertIn('Final Answer: [LETTER]. [OPTION TEXT]', build_option_solution_demo_prompt("A-E"))
+        self.assertIn("both the option letter and its value", build_option_solution_demo_prompt("A-E"))
         self.assertIn("actual target quantity first", build_option_wolfram_demo_prompt("A-E"))
 
     def test_geometry_prompts_forbid_hidden_coordinates(self):

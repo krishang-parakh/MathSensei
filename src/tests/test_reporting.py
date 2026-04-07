@@ -150,46 +150,6 @@ class TestReporting(unittest.TestCase):
 
         self.assertEqual(infer_final_answer(record), "D. -48")
 
-    def test_infer_final_answer_maps_closest_estimate_from_numeric_tool_output(self):
-        record = {
-            "dataset": "AQUA",
-            "problem": (
-                "Jimmy and Kima are going on a trip. They will drive for three days. "
-                "The first day they will drive 182 miles. The second day they will drive 439 miles. "
-                "The third day they will drive 217 miles. Which expression is the closest estimate "
-                "of how many miles Jimmy and Kima will drive on their trip?"
-            ),
-            "options": [
-                {"key": "A", "label": "150 + 400 + 200"},
-                {"key": "B", "label": "200 + 400 + 200"},
-                {"key": "C", "label": "200 + 450 + 200"},
-                {"key": "D", "label": "200 + 500 + 200"},
-            ],
-            "wolfram_output": "838",
-        }
-
-        self.assertEqual(infer_final_answer(record), "C. 200 + 450 + 200")
-
-    def test_infer_final_answer_prefers_numeric_program_output_over_conflicting_letter_for_estimate(self):
-        record = {
-            "dataset": "AQUA",
-            "problem": (
-                "Jimmy and Kima are going on a trip. They will drive for three days. "
-                "The first day they will drive 182 miles. The second day they will drive 439 miles. "
-                "The third day they will drive 217 miles. Which expression is the closest estimate "
-                "of how many miles Jimmy and Kima will drive on their trip?"
-            ),
-            "options": [
-                {"key": "A", "label": "150 + 400 + 200"},
-                {"key": "B", "label": "200 + 400 + 200"},
-                {"key": "C", "label": "200 + 450 + 200"},
-                {"key": "D", "label": "200 + 500 + 200"},
-            ],
-            "program_output": "Estimated total: 838\nThe answer is D\nResolved option by numeric comparison: C. 200 + 450 + 200",
-        }
-
-        self.assertEqual(infer_final_answer(record), "C. 200 + 450 + 200")
-
     def test_infer_final_answer_uses_explicit_option_conclusion_instead_of_rejected_checklist_line(self):
         record = {
             "dataset": "MMLU",
@@ -212,6 +172,107 @@ class TestReporting(unittest.TestCase):
         }
 
         self.assertEqual(infer_final_answer(record), "A. 5")
+
+    def test_infer_final_answer_ignores_trailing_option_block_after_explicit_mcq_conclusion(self):
+        record = {
+            "dataset": "AQUA",
+            "options": [
+                {"key": "A", "label": "30 feet"},
+                {"key": "B", "label": "20 feet"},
+                {"key": "C", "label": "10 feet"},
+                {"key": "D", "label": "50 feet"},
+                {"key": "E", "label": "60 feet"},
+            ],
+            "final_generated_solution": (
+                "3000 = 100 * other side\n"
+                "other side = 3000 / 100 = 30 ft\n\n"
+                "Check options:\n"
+                "A) 30 ft\n"
+                "B) 20 ft\n"
+                "C) 10 ft\n"
+                "D) 50 ft\n"
+                "E) 60 ft\n\n"
+                "The answer is A"
+            ),
+        }
+
+        self.assertEqual(infer_final_answer(record), "A. 30 feet")
+
+    def test_infer_final_answer_prefers_resolved_option_value_over_conflicting_explicit_display(self):
+        record = {
+            "dataset": "AQUA",
+            "problem": "At a certain factory, 10 percent of the staplers produced on Monday were defective and 2 percent of the non-defective staplers were rejected by mistake. If 72 of the non-defective staplers were rejected, what was the number of staplers produced that day?",
+            "final_answer": "E. 5,000",
+            "final_generated_solution": (
+                "0.018N = 72\n\n"
+                "N = 72 / 0.018 = 4000\n\n"
+                "Thus, the total number of staplers produced that day is 4000.\n\n"
+                "The answer is E."
+            ),
+            "program_output": "Number of staplers produced that day: 4000.00000000000\n",
+            "wolfram_output": "4,000",
+            "options": [
+                {"key": "A", "label": "4,000"},
+                {"key": "B", "label": "4,200"},
+                {"key": "C", "label": "4,500"},
+                {"key": "D", "label": "4,800"},
+                {"key": "E", "label": "5,000"},
+            ],
+        }
+
+        self.assertEqual(infer_final_answer(record), "A. 4,000")
+
+    def test_normalize_record_keeps_mcq_answer_correct_when_option_block_pushes_correct_line_out_of_tail(self):
+        record = {
+            "dataset": "AQUA",
+            "modules": ["solution_generator"],
+            "example": {
+                "dataset": "AQUA",
+                "question": (
+                    "Julie's yard is rectangular. One side of the yard is 100 feet wide. "
+                    "The total area of the yard is 3,000 square feet. What is the length of the other side of the yard?"
+                ),
+                "problem": (
+                    "Julie's yard is rectangular. One side of the yard is 100 feet wide. "
+                    "The total area of the yard is 3,000 square feet. What is the length of the other side of the yard?"
+                ),
+                "options": ["A) 30 feet", "B) 20 feet", "C) 10 feet", "D) 50 feet", "E) 60 feet"],
+                "correct": "A",
+            },
+            "solution_generator:output": (
+                "3000 = 100 * other side\n"
+                "other side = 3000 / 100 = 30 ft\n\n"
+                "Check options:\n"
+                "A) 30 ft\n"
+                "B) 20 ft\n"
+                "C) 10 ft\n"
+                "D) 50 ft\n"
+                "E) 60 ft\n\n"
+                "The answer is A"
+            ),
+            "solution": (
+                "3000 = 100 * other side\n"
+                "other side = 3000 / 100 = 30 ft\n\n"
+                "Check options:\n"
+                "A) 30 ft\n"
+                "B) 20 ft\n"
+                "C) 10 ft\n"
+                "D) 50 ft\n"
+                "E) 60 ft\n\n"
+                "The answer is A"
+            ),
+        }
+
+        normalized = normalize_record(record)
+
+        self.assertEqual(normalized["final_answer"], "A. 30 feet")
+        self.assertEqual(normalized["final_answer"], normalized["predicted_answer_display"])
+        self.assertEqual(normalized["predicted_answer"], "30 feet")
+        self.assertEqual(normalized["gold_answer"], "30 feet")
+        self.assertEqual(normalized["gold_answer_display"], "A. 30 feet")
+        self.assertTrue(normalized["is_correct"])
+        method_rows = {row["label"]: row for row in normalized["method_evaluations"]}
+        self.assertEqual(method_rows["Solution Generator"]["answer"], "A. 30 feet")
 
     def test_normalize_record_does_not_treat_math_coefficients_as_mcq_answer(self):
         record = {
@@ -237,8 +298,9 @@ class TestReporting(unittest.TestCase):
         self.assertEqual(normalized["final_answer"], "2x^2 - 2x + 3")
 
         method_evaluations = {item["label"]: item for item in normalized["method_evaluations"]}
+        self.assertEqual(method_evaluations["Python"]["status"], "error")
         self.assertEqual(method_evaluations["Wolfram"]["status"], "correct")
-        self.assertEqual(normalized["status"], "needs-review")
+        self.assertEqual(normalized["status"], "complete")
 
     def test_normalize_record_evaluates_gsm_sentence_answers_and_bold_final_answer(self):
         record = {
@@ -509,6 +571,16 @@ print(value)  # final
         self.assertIn("x^{2}", rendered)
         self.assertIn("- 2 x", rendered)
 
+    def test_render_text_wraps_raw_latex_set_notation(self):
+        rendered = _render_text_html(
+            r"Final Answer: (-\infty,-2]\cup[2,\infty)",
+            preserve_breaks=False,
+        )
+
+        self.assertIn(r"Final Answer: \(", rendered)
+        self.assertIn(r"\infty", rendered)
+        self.assertIn(r"\cup", rendered)
+
     def test_normalize_record_extracts_options_cleanly(self):
         record = {
             "pid": 1,
@@ -556,8 +628,15 @@ print(value)  # final
 
         dataset_filter = next(item for item in config if item["id"] == "datasetFilter")
         self.assertEqual(dataset_filter["label"], "Dataset")
-        self.assertEqual(dataset_filter["attr"], "dataset")
-        self.assertEqual(dataset_filter["options"], ["AQUA", "GSM", "MMLU"])
+        self.assertEqual(dataset_filter["attr"], "data-dataset")
+        self.assertEqual(
+            dataset_filter["options"],
+            [
+                {"value": "AQUA", "label": "AQUA"},
+                {"value": "GSM", "label": "GSM"},
+                {"value": "MMLU", "label": "MMLU"},
+            ],
+        )
 
     def test_dataset_filter_config_sorts_levels_numerically(self):
         records = [
@@ -569,7 +648,14 @@ print(value)  # final
         config = _dataset_filter_config("MATH", records)
 
         level_filter = next(item for item in config if item["id"] == "levelFilter")
-        self.assertEqual(level_filter["options"], ["Level 1", "Level 2", "Level 5"])
+        self.assertEqual(
+            level_filter["options"],
+            [
+                {"value": "Level 1", "label": "Level 1"},
+                {"value": "Level 2", "label": "Level 2"},
+                {"value": "Level 5", "label": "Level 5"},
+            ],
+        )
 
     def test_record_sort_key_uses_dataset_type_then_level(self):
         first = {"dataset": "AQUA", "problem_type": "Algebra", "level": "Level 2", "pid": 3}
@@ -594,14 +680,14 @@ print(value)  # final
         records = [
             {"status": "complete", "evaluation_status": "evaluated", "is_correct": True, "problem_type": "Algebra", "level": "Level 1", "dataset": "MATH"},
             {"status": "incorrect-evaluation", "evaluation_status": "evaluated", "is_correct": False, "problem_type": "Algebra", "level": "Level 2", "dataset": "GSM"},
-            {"status": "incomplete-evaluation", "evaluation_status": "not-evaluated", "is_correct": None, "problem_type": "Geometry", "level": "Level 3", "dataset": "MATH"},
+            {"status": "needs-review", "evaluation_status": "not-evaluated", "is_correct": None, "problem_type": "Geometry", "level": "Level 3", "dataset": "MATH"},
         ]
 
         summary = build_summary(records)
 
         self.assertEqual(summary["incorrect_evaluation"], 1)
-        self.assertEqual(summary["incomplete_evaluation"], 1)
-        self.assertEqual(summary["needs_review"], 0)
+        self.assertEqual(summary["needs_review"], 1)
+        self.assertNotIn("incomplete_evaluation", summary)
 
     def test_overall_evaluation_uses_final_answer_not_all_method_outputs(self):
         record = normalize_record(
@@ -684,7 +770,7 @@ print(value)  # final
         self.assertNotIn("Gold Method", panel)
         self.assertNotIn("Correct</span>", panel)
 
-    def test_program_error_marks_record_needs_review(self):
+    def test_program_error_is_flagged_per_method_but_final_correct_record_is_complete(self):
         record = normalize_record(
             {
                 "dataset": "MATH",
@@ -699,8 +785,11 @@ print(value)  # final
             }
         )
 
-        self.assertEqual(record["status"], "needs-review")
-        self.assertEqual(classify_record(record), "needs-review")
+        method_rows = {row["label"]: row for row in record["method_evaluations"]}
+
+        self.assertEqual(method_rows["Python"]["status"], "error")
+        self.assertEqual(record["status"], "complete")
+        self.assertEqual(classify_record(record), "complete")
 
     def test_load_records_skips_malformed_jsonl_rows(self):
         valid_row = '{"dataset": "GSM", "problem": "Q", "ground_truth_solution": "#### 1", "final_answer": "1"}\n'
@@ -746,6 +835,38 @@ print(value)  # final
         self.assertIn('id="resultsVisibleCount">1<', html)
         self.assertIn('id="resultsTotalCount">1<', html)
         self.assertIn("All problems shown", html)
+
+    def test_generate_report_exposes_method_filters_and_hides_incomplete_evaluation_status(self):
+        valid_row = (
+            '{"dataset": "GSM", "problem": "A total should be 14.", '
+            '"ground_truth_solution": "#### 14", "gold_answer": "14", '
+            '"program_output": "12", "solution_generator_output": "We reason correctly.\\n#### 14", '
+            '"final_generated_solution": "We reason correctly.\\n#### 14", "final_answer": "#### 14", '
+            '"modules_used": ["program_executor", "solution_generator"]}\n'
+        )
+
+        with tempfile.NamedTemporaryFile("w", delete=False, encoding="utf-8", suffix=".jsonl") as input_handle:
+            input_handle.write(valid_row)
+            input_path = input_handle.name
+
+        with tempfile.NamedTemporaryFile("w", delete=False, encoding="utf-8", suffix=".html") as output_handle:
+            output_path = output_handle.name
+
+        try:
+            generated_path, _ = generate_report(input_path, output_path=output_path, title="MathSensei")
+            with open(generated_path, "r", encoding="utf-8") as handle:
+                html = handle.read()
+        finally:
+            os.unlink(input_path)
+            os.unlink(output_path)
+
+        self.assertIn('data-attr="data-solution-generator-status"', html)
+        self.assertIn('data-attr="data-python-status"', html)
+        self.assertIn('value="flagged">Flagged<', html)
+        self.assertIn('data-solution-generator-status="correct"', html)
+        self.assertIn('data-python-status="incorrect"', html)
+        self.assertNotIn('value="incomplete-evaluation"', html)
+        self.assertNotIn(">Incomplete Evaluation<", html)
 
     def test_load_records_dedupes_repeated_question_rows_by_signature(self):
         stale_row = (

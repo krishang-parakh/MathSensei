@@ -96,6 +96,71 @@ def extract_final_answer_option_letter(text, allowed="ABCDE"):
     return match.upper() if match else None
 
 
+def option_listing_line(text, allowed="ABCDE"):
+    cleaned = clean_answer_text(text)
+    if not cleaned:
+        return False
+
+    stripped = cleaned.replace("**", "").replace("__", "").replace("`", "").strip()
+    escaped_allowed = re.escape(str(allowed))
+    return bool(
+        re.match(
+            rf"^(?:option\s+)?[{escaped_allowed}][\)\.\:]\s*",
+            stripped,
+            flags=re.IGNORECASE,
+        )
+    )
+
+
+def candidate_looks_like_option_listing(text, allowed="ABCDE"):
+    if not option_listing_line(text, allowed=allowed):
+        return False
+
+    cleaned = clean_answer_text(text)
+    if not cleaned:
+        return False
+
+    lowered = cleaned.lower()
+    if any(
+        marker in lowered
+        for marker in (
+            "final answer",
+            "the correct answer is",
+            "the answer is",
+            "answer:",
+            "correct option",
+            "correct answer",
+            " is correct",
+            "matches",
+            "matched",
+            "not correct",
+            "incorrect",
+            "wrong",
+            "therefore",
+            "thus",
+            "hence",
+        )
+    ):
+        return False
+
+    return True
+
+
+def text_has_option_listing_block(text, allowed="ABCDE", threshold=2):
+    cleaned = clean_answer_text(text)
+    if not cleaned:
+        return False
+
+    count = 0
+    for line in cleaned.splitlines():
+        if option_listing_line(line, allowed=allowed):
+            count += 1
+            if count >= threshold:
+                return True
+
+    return False
+
+
 def candidate_has_rejection_cue(text):
     cleaned = clean_answer_text(text)
     if not cleaned:
@@ -259,6 +324,23 @@ def _extract_rhs_candidate(line):
     concise_right = _clean_candidate_text(right)
     if not concise_right:
         return None
+    if option_listing_line(cleaned):
+        lowered_right = concise_right.lower()
+        if not any(
+            marker in lowered_right
+            for marker in (
+                "answer",
+                "correct",
+                "match",
+                "matches",
+                "matched",
+                "solution",
+                "therefore",
+                "thus",
+                "hence",
+            )
+        ):
+            return None
     if len(concise_right) > 72:
         return None
     if re.search(r",\s*(?:and|but|or|which|that|because|since|while|where|when)\b", concise_right, re.IGNORECASE):

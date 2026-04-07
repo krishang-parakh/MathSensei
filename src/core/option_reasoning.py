@@ -272,9 +272,6 @@ def _closest_numeric_option_match(candidates: Iterable[Optional[str]], numeric_o
             )
             for entry, numeric_option_value in numeric_options
         )
-        if len(ranked) > 1 and _numeric_values_equivalent(ranked[0][0], ranked[1][0]):
-            continue
-
         _, _, best_entry, best_value = ranked[0]
         return {
             **best_entry,
@@ -295,45 +292,39 @@ def select_option_from_values(
     question_text: Optional[str] = None,
     allow_nearest: bool = True,
 ):
+    """
+    Resolve an answer text to an option key/label through a natural, linear process:
+    1. Try exact matching on all candidates (most reliable)
+    2. If no match and closest-numeric is allowed, find the numerically closest option
+    3. Return the first matching result, or None if no match
+    
+    This design is intentionally simple to avoid conditional skips and multiple passes.
+    """
     entries = option_entries(options)
     if not entries:
         return None
 
     candidates = _candidate_texts_for_resolution(text_values)
-    closest_requested = allow_nearest and question_requests_closest_option(question_text)
-
-    numeric_options = []
-    if closest_requested:
-        numeric_options = []
-        for entry in entries:
-            numeric_value = extract_numeric_expression_value(entry["label"])
-            if numeric_value is None:
-                continue
-            if "none of these" in entry["label"].lower():
-                continue
-            numeric_options.append((entry, numeric_value))
-
-        substantive_candidates = [candidate for candidate in candidates if not _is_bare_option_reference(candidate)]
-        for candidate in substantive_candidates:
-            matched = _exact_option_match(candidate, entries)
-            if matched and matched.get("match_type") != "explicit-option":
-                return matched
-
-        if len(numeric_options) >= 2:
-            closest_match = _closest_numeric_option_match(substantive_candidates, numeric_options)
-            if closest_match:
-                return closest_match
-
+    
+    # STEP 1: Try exact matching on all candidates (most reliable method)
     for candidate in candidates:
         matched = _exact_option_match(candidate, entries)
         if matched:
             return matched
-
-    if not closest_requested or len(numeric_options) < 2:
-        return None
-
-    closest_match = _closest_numeric_option_match(candidates, numeric_options)
-    if closest_match:
-        return closest_match
-
+    
+    # STEP 2: Try closest-numeric matching (second-best for approximate answers)
+    # Only attempt if: (a) caller allows it, (b) question requests it, (c) we have multiple options
+    if allow_nearest and question_requests_closest_option(question_text):
+        numeric_options = []
+        for entry in entries:
+            numeric_value = extract_numeric_expression_value(entry["label"])
+            if numeric_value is not None and "none of these" not in entry["label"].lower():
+                numeric_options.append((entry, numeric_value))
+        
+        # Only use closest-numeric if we have at least 2 numeric options to choose between
+        if len(numeric_options) >= 2:
+            closest_match = _closest_numeric_option_match(candidates, numeric_options)
+            if closest_match:
+                return closest_match
+    
     return None

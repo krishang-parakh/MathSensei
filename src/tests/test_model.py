@@ -8,11 +8,6 @@ SRC_DIR = os.path.dirname(TESTS_DIR)
 if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 
-os.environ.setdefault("OPENAI_API_BASE", "https://example.openai.azure.com/")
-os.environ.setdefault("OPENAI_API_KEY", "test-key")
-os.environ.setdefault("OPENAI_API_VERSION", "2024-02-01")
-os.environ.setdefault("OPENAI_DEPLOYMENT_NAME", "test-deployment")
-
 import model as model_module
 from model import solver
 

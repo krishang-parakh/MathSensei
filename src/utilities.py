@@ -8,11 +8,13 @@ from io import StringIO
 from contextlib import redirect_stdout
 from math import isclose
 from typing import Any, Optional
+from urllib.parse import urlparse
 
 try:
     import matplotlib
 except Exception:
     matplotlib = None
+import httpx
 import requests
 try:
     import google.generativeai as genai
@@ -24,7 +26,11 @@ try:
 except Exception:
     def load_dotenv(*args, **kwargs):
         return False
-from openai import AzureOpenAI
+try:
+    from openai import AzureOpenAI, OpenAI
+except Exception:
+    AzureOpenAI = None
+    OpenAI = None
 
 logging.basicConfig(
     format="%(asctime)s %(message)s",
@@ -34,7 +40,17 @@ logging.basicConfig(
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ENV_PATH = os.path.join(BASE_DIR, ".env")
-load_dotenv(ENV_PATH)
+_PRE_DOTENV_OPENAI_ENV = {
+    name: os.environ.get(name)
+    for name in (
+        "OPENAI_API_KEY",
+        "OPENAI_API_BASE",
+        "OPENAI_API_VERSION",
+        "OPENAI_DEPLOYMENT_NAME",
+        "MODEL_NAME",
+    )
+}
+load_dotenv(ENV_PATH, override=True)
 
 if matplotlib is not None:
     matplotlib.use("Agg")
@@ -43,21 +59,180 @@ if matplotlib is not None:
 def _get_env(name: str, default: Optional[str] = None, required: bool = False) -> Optional[str]:
     value = os.getenv(name, default)
     if required and (value is None or str(value).strip() == ""):
-        raise RuntimeError(f"Missing required environment variable: {name}")
+        raise RuntimeError(f"Missing required environment variable: {name}. Check {ENV_PATH}")
     return value
 
 
-AZURE_ENDPOINT = _get_env("OPENAI_API_BASE", required=True)
-AZURE_API_KEY = _get_env("OPENAI_API_KEY", required=True)
-AZURE_API_VERSION = _get_env("OPENAI_API_VERSION", required=True)
-AZURE_DEPLOYMENT_NAME = _get_env("OPENAI_DEPLOYMENT_NAME", required=True)
-MODEL_NAME = _get_env("MODEL_NAME", default=AZURE_DEPLOYMENT_NAME)
+def _clean_env_value(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    value = str(value).strip()
+    return value or None
 
-client = AzureOpenAI(
-    api_key=AZURE_API_KEY,
-    api_version=AZURE_API_VERSION,
-    azure_endpoint=AZURE_ENDPOINT,
+
+def _looks_like_standard_openai_key(value: Optional[str]) -> bool:
+    return bool(_clean_env_value(value) and _clean_env_value(value).startswith("sk-"))
+
+
+_PROXY_ENV_NAMES = (
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
 )
+
+
+def _looks_like_broken_loopback_proxy(proxy_url: Optional[str]) -> bool:
+    if proxy_url in (None, ""):
+        return False
+
+    try:
+        parsed = urlparse(str(proxy_url).strip())
+    except Exception:
+        return False
+
+    host = (parsed.hostname or "").strip().lower()
+    port = parsed.port
+    if host not in {"127.0.0.1", "localhost", "::1", "0.0.0.0"}:
+        return False
+    return port == 9
+
+
+def _should_bypass_env_proxies() -> bool:
+    return any(_looks_like_broken_loopback_proxy(os.getenv(name)) for name in _PROXY_ENV_NAMES)
+
+
+PROXY_BYPASS_ACTIVE = _should_bypass_env_proxies()
+if PROXY_BYPASS_ACTIVE:
+    logging.warning(
+        "Detected broken proxy environment variables pointing to a loopback discard port; "
+        "MathSensei will bypass environment proxies for outbound API requests."
+    )
+
+
+def _new_requests_session():
+    session = requests.Session()
+    session.trust_env = not PROXY_BYPASS_ACTIVE
+    return session
+
+
+def _requests_request(method: str, url: str, **kwargs):
+    session = _new_requests_session()
+    try:
+        return session.request(method=method.upper(), url=url, **kwargs)
+    finally:
+        session.close()
+
+
+_ENV_OPENAI_API_KEY = _clean_env_value(_get_env("OPENAI_API_KEY"))
+_SHELL_OPENAI_API_KEY = _clean_env_value(_PRE_DOTENV_OPENAI_ENV.get("OPENAI_API_KEY"))
+
+STANDARD_OPENAI_API_KEY = None
+if _looks_like_standard_openai_key(_SHELL_OPENAI_API_KEY):
+    STANDARD_OPENAI_API_KEY = _SHELL_OPENAI_API_KEY
+elif _looks_like_standard_openai_key(_ENV_OPENAI_API_KEY):
+    STANDARD_OPENAI_API_KEY = _ENV_OPENAI_API_KEY
+
+AZURE_ENDPOINT = _clean_env_value(_get_env("OPENAI_API_BASE"))
+AZURE_API_KEY = _ENV_OPENAI_API_KEY if not _looks_like_standard_openai_key(_ENV_OPENAI_API_KEY) else None
+AZURE_API_VERSION = _clean_env_value(_get_env("OPENAI_API_VERSION"))
+AZURE_DEPLOYMENT_NAME = _clean_env_value(_get_env("OPENAI_DEPLOYMENT_NAME"))
+MODEL_NAME = (
+    _clean_env_value(_PRE_DOTENV_OPENAI_ENV.get("MODEL_NAME"))
+    or _clean_env_value(_get_env("MODEL_NAME"))
+    or AZURE_DEPLOYMENT_NAME
+    or _clean_env_value(_get_env("DEFAULT_ENGINE"))
+    or "gpt-5.3-chat"
+)
+
+if STANDARD_OPENAI_API_KEY and AZURE_ENDPOINT and AZURE_DEPLOYMENT_NAME:
+    logging.info(
+        "Detected a standard OpenAI project key from the shell plus Azure config in src/.env; "
+        "MathSensei will prefer the standard OpenAI API for chat calls using model %r.",
+        MODEL_NAME,
+    )
+elif _looks_like_standard_openai_key(_ENV_OPENAI_API_KEY) and AZURE_ENDPOINT:
+    logging.warning(
+        "OPENAI_API_KEY looks like a standard OpenAI project key (starts with 'sk-'), "
+        "so chat calls will use the standard OpenAI API instead of AzureOpenAI."
+    )
+
+_azure_client = None
+_standard_openai_client = None
+
+
+def _new_httpx_client():
+    return httpx.Client(trust_env=not PROXY_BYPASS_ACTIVE)
+
+
+def _has_standard_openai_config() -> bool:
+    return bool(STANDARD_OPENAI_API_KEY)
+
+
+def _has_azure_chat_config() -> bool:
+    return bool(AZURE_ENDPOINT and AZURE_API_KEY and AZURE_API_VERSION and AZURE_DEPLOYMENT_NAME)
+
+
+def _chat_backend_mode() -> str:
+    if _has_standard_openai_config():
+        return "openai"
+    if _has_azure_chat_config():
+        return "azure"
+    return "missing"
+
+
+def _get_azure_client():
+    global _azure_client
+    if _azure_client is not None:
+        return _azure_client
+    if AzureOpenAI is None:
+        raise RuntimeError("openai.AzureOpenAI is unavailable; install a recent openai package.")
+
+    missing = [
+        name
+        for name, value in (
+            ("OPENAI_API_BASE", AZURE_ENDPOINT),
+            ("OPENAI_API_KEY", AZURE_API_KEY),
+            ("OPENAI_API_VERSION", AZURE_API_VERSION),
+            ("OPENAI_DEPLOYMENT_NAME", AZURE_DEPLOYMENT_NAME),
+        )
+        if not value
+    ]
+    if missing:
+        raise RuntimeError(
+            "Azure OpenAI chat is not configured. Missing: "
+            + ", ".join(missing)
+            + f". Check {ENV_PATH}"
+        )
+
+    _azure_client = AzureOpenAI(
+        api_key=AZURE_API_KEY,
+        api_version=AZURE_API_VERSION,
+        azure_endpoint=AZURE_ENDPOINT,
+        http_client=_new_httpx_client(),
+    )
+    return _azure_client
+
+
+def _get_standard_openai_client():
+    global _standard_openai_client
+    if _standard_openai_client is not None:
+        return _standard_openai_client
+    if OpenAI is None:
+        raise RuntimeError("openai.OpenAI is unavailable; install a recent openai package.")
+    if not STANDARD_OPENAI_API_KEY:
+        raise RuntimeError(
+            "Standard OpenAI chat is not configured. Set OPENAI_API_KEY to an sk-... key "
+            "or provide Azure chat settings in src/.env."
+        )
+
+    _standard_openai_client = OpenAI(
+        api_key=STANDARD_OPENAI_API_KEY,
+        http_client=_new_httpx_client(),
+    )
+    return _standard_openai_client
 
 GOOGLE_API_KEY = _get_env("GOOGLE_API_KEY")
 if GOOGLE_API_KEY and genai is not None:
@@ -146,6 +321,46 @@ def _http_status_code_from_error(exc) -> Optional[int]:
     if match:
         return int(match.group(1))
     return None
+
+
+def _diagnose_openai_error(exc) -> Optional[str]:
+    message = str(exc or "")
+    diagnostics = []
+
+    if PROXY_BYPASS_ACTIVE:
+        diagnostics.append(
+            "Detected broken proxy env vars such as HTTP_PROXY/HTTPS_PROXY pointing to 127.0.0.1:9; outbound API calls are bypassing env proxies."
+        )
+
+    if "only supported in v1/responses" in message:
+        diagnostics.append(
+            "The configured model only supports the Responses API. Standard OpenAI calls must use "
+            "client.responses.create(...) rather than client.chat.completions.create(...)."
+        )
+
+    if "Resource not found" in message or _http_status_code_from_error(exc) == 404:
+        diagnostics.append(
+            "Azure returned 404 Resource not found. Check OPENAI_DEPLOYMENT_NAME, OPENAI_API_BASE, and OPENAI_API_VERSION. "
+            f"Current values: deployment={AZURE_DEPLOYMENT_NAME!r}, endpoint={AZURE_ENDPOINT!r}, api_version={AZURE_API_VERSION!r}. "
+            "This usually means the deployment name, endpoint, or API version is wrong rather than the API key."
+        )
+
+    cause = getattr(exc, "__cause__", None)
+    cause_text = str(cause or "")
+    if "127.0.0.1:9" in message or "127.0.0.1:9" in cause_text or "actively refused" in cause_text:
+        diagnostics.append(
+            "The connection was refused before authentication. A broken local proxy or blocked outbound route is more likely than an invalid API key."
+        )
+
+    if _chat_backend_mode() == "missing":
+        diagnostics.append(
+            "No usable chat backend is configured. Set OPENAI_API_KEY to a standard sk-... key for the standard OpenAI API, "
+            "or set OPENAI_API_BASE, OPENAI_API_VERSION, OPENAI_DEPLOYMENT_NAME, and an Azure OPENAI_API_KEY for Azure OpenAI."
+        )
+
+    if not diagnostics:
+        return None
+    return " ".join(diagnostics)
 
 
 def _normalize_code_block(code_string: str) -> str:
@@ -353,6 +568,100 @@ def _sleep_if_needed(sleep_time: float) -> None:
         logging.info("---------Sleep ends----------")
 
 
+def _content_to_text(content) -> str:
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, dict):
+                text = item.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
+            elif item is not None:
+                parts.append(str(item))
+        return "\n".join(part for part in parts if part)
+    return str(content)
+
+
+def _get_attr_or_key(obj, name, default=None):
+    if isinstance(obj, dict):
+        return obj.get(name, default)
+    return getattr(obj, name, default)
+
+
+def _messages_to_responses_input(messages):
+    response_input = []
+    for message in messages:
+        role = _get_attr_or_key(message, "role", "user") or "user"
+        text = _content_to_text(_get_attr_or_key(message, "content", ""))
+        if not text:
+            continue
+        response_input.append(
+            {
+                "role": role,
+                "content": [{"type": "input_text", "text": text}],
+            }
+        )
+    return response_input
+
+
+def _extract_responses_text(response) -> str:
+    output_text = _get_attr_or_key(response, "output_text")
+    if isinstance(output_text, str) and output_text.strip():
+        return output_text.strip()
+
+    output_items = _get_attr_or_key(response, "output", []) or []
+    fragments = []
+    for item in output_items:
+        content_parts = _get_attr_or_key(item, "content", []) or []
+        for part in content_parts:
+            text = _get_attr_or_key(part, "text")
+            if isinstance(text, str) and text:
+                fragments.append(text)
+
+    return "\n".join(fragments).strip()
+
+
+def _apply_stop_sequences(text: str, stop) -> str:
+    if not text or stop is None:
+        return text
+
+    if isinstance(stop, str):
+        stop_sequences = [stop]
+    else:
+        stop_sequences = [sequence for sequence in stop if sequence]
+
+    cut_positions = [text.find(sequence) for sequence in stop_sequences if text.find(sequence) != -1]
+    if cut_positions:
+        text = text[:min(cut_positions)]
+    return text.strip()
+
+
+def _chat_completion_standard_openai(messages, temperature=0.0, max_tokens=5000, stop=None):
+    client = _get_standard_openai_client()
+    kwargs = {
+        "model": MODEL_NAME,
+        "input": _messages_to_responses_input(messages),
+        "max_output_tokens": max_tokens,
+    }
+    if temperature is not None:
+        kwargs["temperature"] = temperature
+
+    try:
+        response = client.responses.create(**kwargs)
+    except Exception as exc:
+        if "temperature" in str(exc).lower() and "unsupported" in str(exc).lower():
+            kwargs.pop("temperature", None)
+            response = client.responses.create(**kwargs)
+        else:
+            raise
+
+    return _apply_stop_sequences(_extract_responses_text(response), stop)
+
+
 def get_textdavinci002_response(prompt, temperature, max_tokens, n=1, patience=1, sleep_time=0):
     deployment = _get_env("OPENAI_TEXTDAVC002_DEPLOYMENT_NAME", required=True)
     last_error = None
@@ -445,12 +754,34 @@ def get_gpt3_response(
 
 def _chat_completion(messages, temperature=0.0, max_tokens=5000, stop=None):
     messages = _sanitize_messages_for_model_input(messages)
+    
+    # Determine which backend to use and get the appropriate client
+    backend = _chat_backend_mode()
+    if backend == "openai":
+        client = _get_standard_openai_client()
+        model_name = MODEL_NAME
+    elif backend == "azure":
+        client = _get_azure_client()
+        model_name = AZURE_DEPLOYMENT_NAME
+    else:
+        raise RuntimeError(
+            "Chat API is not configured. Set OPENAI_API_KEY (for standard OpenAI) or "
+            "OPENAI_API_BASE, OPENAI_API_KEY, OPENAI_API_VERSION, OPENAI_DEPLOYMENT_NAME "
+            "(for Azure) in src/.env"
+        )
+    
     kwargs = {
-        "model": AZURE_DEPLOYMENT_NAME,
+        "model": model_name,
         "messages": messages,
-        "temperature": temperature,
-        "max_tokens": max_tokens,
     }
+    
+    # Handle backend-specific parameters: Azure doesn't support temperature, only max_completion_tokens
+    if backend == "azure":
+        kwargs["max_completion_tokens"] = max_tokens
+    else:
+        kwargs["temperature"] = temperature
+        kwargs["max_tokens"] = max_tokens
+    
     if stop is not None:
         kwargs["stop"] = stop
 
@@ -493,6 +824,9 @@ def get_chat_response_code(
             logging.exception("Azure chat code call failed: %s", e)
             _sleep_if_needed(sleep_time)
 
+    diagnostic = _diagnose_openai_error(last_error)
+    if diagnostic:
+        raise RuntimeError(f"Azure chat code call failed after retries: {last_error}. {diagnostic}")
     raise RuntimeError(f"Azure chat code call failed after retries: {last_error}")
 
 
@@ -557,7 +891,7 @@ def get_gemini_response(full_prompt):
                     }
                 ]
             }
-            response = requests.post(url, json=payload, timeout=120)
+            response = _requests_request("POST", url, json=payload, timeout=120)
             response.raise_for_status()
             data = response.json()
 
@@ -609,6 +943,9 @@ def get_chat_response(messages, temperature=0, max_tokens=5000, n=1, patience=1,
             logging.exception("Azure chat call failed: %s", e)
             _sleep_if_needed(sleep_time)
 
+    diagnostic = _diagnose_openai_error(last_error)
+    if diagnostic:
+        raise RuntimeError(f"Azure chat call failed after retries: {last_error}. {diagnostic}")
     raise RuntimeError(f"Azure chat call failed after retries: {last_error}")
 
 
@@ -667,7 +1004,7 @@ def call_bing_search(endpoint, bing_api_key, query, count):
     }
 
     try:
-        response = requests.get(endpoint, headers=headers, params=params, timeout=30)
+        response = _requests_request("GET", endpoint, headers=headers, params=params, timeout=30)
         logging.info("BING CALLED")
         if response.status_code == 200:
             return response.json()
@@ -700,7 +1037,7 @@ def get_webpage_content():
     from bs4 import BeautifulSoup
 
     url = "https://en.wikipedia.org/wiki/Ryan_Gosling"
-    response = requests.get(url, timeout=30)
+    response = _requests_request("GET", url, timeout=30)
     soup = BeautifulSoup(response.text, "html.parser")
     text = soup.get_text()
     lines = text.splitlines()

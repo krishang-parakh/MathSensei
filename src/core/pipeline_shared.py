@@ -30,7 +30,11 @@ def parse_wolfram_query_response(text: Optional[str]):
     final_idx = cleaned.find("Final Query:")
     answer_idx = cleaned.find("Answer:")
     thought_block = cleaned[:answer_idx] if answer_idx != -1 else cleaned[:final_idx]
-    query = remove_wrapping_backticks(cleaned[final_idx + len("Final Query:"):].strip())
+    query_block = cleaned[final_idx + len("Final Query:"):]
+    first_line = query_block.split("\n")[0].strip()
+    if "##" in first_line:
+        first_line = first_line[:first_line.index("##")].strip()
+    query = remove_wrapping_backticks(first_line)
     if not query:
         return None
 
@@ -126,6 +130,7 @@ def build_wolfram_next_step_prompt(question_text: str, trace) -> str:
         "- Do not finalize if the current output only solves an intermediate subproblem.\n"
         "- Finalize only when every condition in the original question has been satisfied.\n"
         "- If the original question includes answer choices, the final answer must align with those choices rather than stopping at an unmatched raw number.\n"
+        "- If you are checking answer choices one by one, do not finalize until every choice has been explicitly checked or ruled out.\n"
         "- For closest, nearest, approximate, or estimate questions, compare the computed quantity against every numeric option and choose the closest valid option.\n"
         "- For closest, nearest, approximate, or estimate questions, explicitly evaluate every option and compare absolute differences before naming an option. Never guess an option letter.\n"
         "- If the options are expressions, evaluate the expressions before choosing the final option.\n"
@@ -211,13 +216,13 @@ def resolve_wolfram_answer(
     chat_callable: Callable[[str, int], str],
     max_tokens: int = 5000,
     wolfram_model: str = "no",
-    text_davinci003_callable: Optional[Callable[[str, float, int], str]] = None,
+    text_completion_callable: Optional[Callable[[str, int], str]] = None,
     gemini_callable: Optional[Callable[[str], str]] = None,
 ) -> str:
     prompt = build_wolfram_answer_cleaner_prompt(query, result)
 
-    if wolfram_model == "text_davinci_003" and text_davinci003_callable is not None:
-        return text_davinci003_callable(prompt, 0.5, max_tokens)
+    if wolfram_model in {"text_davinci_002", "text_davinci_003"} and text_completion_callable is not None:
+        return text_completion_callable(prompt, max_tokens)
 
     if wolfram_model == "gemini" and gemini_callable is not None:
         return gemini_callable(prompt)

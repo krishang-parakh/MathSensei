@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 -c \"import sys,json; data=json.load\\(sys.stdin\\); print\\(type\\(data[0]['options']\\), data[0]['options'][:2] if data[0].get\\('options'\\) else 'no options'\\)\")",
+      "Bash(python -c \"import json; data=json.loads\\(open\\('src/data/AQUA/test.json'\\).read\\(\\)\\); print\\(type\\(data[0]['options']\\), data[0]['options'][:2]\\)\")"
+    ]
+  }
+}

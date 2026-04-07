@@ -10,22 +10,13 @@ import csv
 import argparse
 import pprint
 import time
-from huggingface_hub import login
-from transformers import AutoTokenizer,AutoModelForCausalLM,BitsAndBytesConfig
-import transformers
-import torch
-from huggingface_hub import snapshot_download
 
 import logging
 logging.basicConfig(format='%(asctime)s %(message)s', datefmt='%m/%d/%Y %I:%M:%S %p', level=logging.INFO)
 
-try:
-    from dotenv import load_dotenv
-except Exception:
-    def load_dotenv(*args, **kwargs):
-        return False
+from core.env_loader import load_dotenv
 
-load_dotenv(".env")
+load_dotenv(os.path.join(os.path.dirname(__file__), ".env"), override=True)
 
 try:
     import wolframalpha
@@ -64,6 +55,33 @@ from core.app_support import solution_prompt_family
 
 # Set up huggingface token 
 huggingface_token = os.getenv('HUGGINGFACE_TOKEN')
+_HUGGINGFACE_RUNTIME = None
+
+
+def _get_huggingface_runtime():
+    global _HUGGINGFACE_RUNTIME
+    if _HUGGINGFACE_RUNTIME is not None:
+        return _HUGGINGFACE_RUNTIME
+
+    try:
+        from huggingface_hub import login, snapshot_download
+        from transformers import AutoTokenizer, AutoModelForCausalLM
+        import transformers
+        import torch
+    except Exception as exc:
+        raise RuntimeError(
+            "Local Hugging Face backends require huggingface_hub, transformers, and torch."
+        ) from exc
+
+    _HUGGINGFACE_RUNTIME = {
+        "login": login,
+        "snapshot_download": snapshot_download,
+        "AutoTokenizer": AutoTokenizer,
+        "AutoModelForCausalLM": AutoModelForCausalLM,
+        "transformers": transformers,
+        "torch": torch,
+    }
+    return _HUGGINGFACE_RUNTIME
 
 
 # Helper functions 
@@ -480,6 +498,7 @@ from core.question_isolation import (
     question_explicitly_uses_coordinates,
 )
 from core.option_reasoning import (
+    option_entries,
     program_uses_unsupported_closest_estimate_rounding,
     question_requests_closest_option,
     select_option_from_values,
@@ -495,6 +514,73 @@ class solver:
         if not self._is_geometry_problem():
             return False
         return not question_explicitly_uses_coordinates(question_text or self.get_question_text())
+
+    def _configured_temperature(self, attr_name, default):
+        try:
+            return float(getattr(self, attr_name, default))
+        except (TypeError, ValueError):
+            return float(default)
+
+    def _configured_max_tokens(self, attr_name, default):
+        try:
+            return max(1, int(getattr(self, attr_name, default)))
+        except (TypeError, ValueError):
+            return int(default)
+
+    def _configured_patience(self, attr_name, default=1):
+        try:
+            return max(1, int(getattr(self, attr_name, default)))
+        except (TypeError, ValueError):
+            return int(default)
+
+    def _query_generation_settings(self):
+        return {
+            "temperature": self._configured_temperature("qg_temperature", 0.0),
+            "max_tokens": self._configured_max_tokens("qg_max_tokens", 1000),
+            "patience": self._configured_patience("qg_patience", 10),
+        }
+
+    def _knowledge_extraction_settings(self):
+        return {
+            "temperature": self._configured_temperature("kr_temperature", 0.5),
+            "max_tokens": self._configured_max_tokens("kr_max_tokens", 1000),
+        }
+
+    def _call_text_backend(self, backend_name, prompt, *, temperature, max_tokens, patience=1):
+        retries = max(1, int(patience or 1))
+        messages = [{"role": "user", "content": prompt}]
+
+        if backend_name == "text_davinci_002":
+            return get_textdavinci002_response(
+                prompt=prompt,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                patience=retries,
+            )
+
+        if backend_name == "text_davinci_003":
+            return get_textdavinci003_response(
+                prompt,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                patience=retries,
+            )
+
+        if backend_name == "gemini":
+            last_error = None
+            for _ in range(retries):
+                try:
+                    return get_gemini_response(prompt)
+                except Exception as exc:
+                    last_error = exc
+            raise last_error or RuntimeError("Gemini call failed before a response was returned.")
+
+        return get_chat_response(
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            patience=retries,
+        )
 
     def _call_python_generation_backend(self, full_prompt, backend_name=None):
         selected_backend = self.python_model if backend_name is None else backend_name
@@ -700,7 +786,8 @@ class solver:
         example = self.cache.get("example") or {}
         raw_options = example.get("options")
         if raw_options:
-            return raw_options
+            entries = option_entries(raw_options)
+            return entries or None
 
         if self.dataset == "MMLU":
             options = []
@@ -725,10 +812,150 @@ class solver:
             question_text=question_text or self.get_question_text(),
         )
 
+    def _normalize_option_probe_text(self, text):
+        cleaned = remove_wrapping_backticks(str(text or "")).strip()
+        if not cleaned:
+            return ""
+
+        cleaned = cleaned.replace("**", "").replace("__", "").replace("`", "")
+        cleaned = re.sub(
+            rf"^\s*(?:option\s+)?[{re.escape(self._allowed_option_letters())}][\)\.\:\s-]+",
+            "",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+        return re.sub(r"\s+", "", cleaned.lower())
+
+    def _wolfram_query_targets_option(self, query, option):
+        query_text = remove_wrapping_backticks(str(query or "")).strip()
+        if not query_text:
+            return False
+
+        option_key = str(option.get("key") or "").strip().upper()
+        option_label = str(option.get("label") or "").strip()
+        if option_key:
+            if re.search(rf"\boption\s+{re.escape(option_key)}\b", query_text, flags=re.IGNORECASE):
+                return True
+            if re.search(rf"^\s*{re.escape(option_key)}[\)\.\:]\s*", query_text, flags=re.IGNORECASE):
+                return True
+
+        query_probe = self._normalize_option_probe_text(query_text)
+        label_probe = self._normalize_option_probe_text(option_label)
+        if not query_probe or not label_probe:
+            return False
+        if query_probe == label_probe:
+            return True
+        return len(label_probe) >= 4 and label_probe in query_probe
+
+    def _wolfram_checked_option_keys(self, trace):
+        checked_keys = []
+        for option in self._current_options() or []:
+            option_key = option.get("key")
+            if not option_key:
+                continue
+            if any(self._wolfram_query_targets_option(step.get("query"), option) for step in trace or []):
+                checked_keys.append(str(option_key).strip().upper())
+        return checked_keys
+
+    def _wolfram_remaining_option_keys(self, trace):
+        options = self._current_options() or []
+        if len(options) < 2:
+            return []
+
+        checked_keys = self._wolfram_checked_option_keys(trace)
+        if not checked_keys:
+            return []
+
+        return [
+            str(option.get("key")).strip().upper()
+            for option in options
+            if option.get("key") and str(option.get("key")).strip().upper() not in checked_keys
+        ]
+
+    def _resolve_independent_option_consensus(self, question_text=None):
+        question = question_text or self.get_question_text()
+        source_matches = []
+        for source_name, text in (
+            ("program_executor", self.cache.get("program_executor:output")),
+            ("wolfram_alpha_search", self.cache.get("wolfram_alpha_search:output")),
+        ):
+            resolved = self._resolve_option_crosscheck(text, question_text=question)
+            if resolved:
+                source_matches.append((source_name, resolved))
+
+        if len(source_matches) < 2:
+            return None
+
+        first_key = source_matches[0][1]["key"]
+        if all(match["key"] == first_key for _, match in source_matches[1:]):
+            return source_matches[0][1]
+
+        return None
+
     def _format_resolved_option_answer(self, resolved_option):
         if not resolved_option:
             return None
         return f"{resolved_option['key']}. {resolved_option['label']}"
+
+    def _normalize_solution_step_breaks(self, solution):
+        if solution in (None, ""):
+            return solution
+
+        formatted = remove_wrapping_backticks(str(solution))
+        formatted = formatted.replace("\r\n", "\n").replace("\r", "\n").strip()
+        if not formatted:
+            return formatted
+
+        inline_break_patterns = (
+            r"(?<=[.!?])\s+(Step\s+\d+\s*[:.)-])",
+            r"(?<=[.!?])\s+(\d+[\).]\s+)",
+            r"(?<=[.!?])\s+(Final Answer\s*:)",
+        )
+        for pattern in inline_break_patterns:
+            formatted = re.sub(pattern, r"\n\n\1", formatted, flags=re.IGNORECASE)
+
+        marker_re = re.compile(r"^\s*(?:Step\s+\d+\s*[:.)-]|\d+[\).]\s+|Final Answer\s*:)", re.IGNORECASE)
+        normalized_lines = []
+        for line in formatted.splitlines():
+            current = line.rstrip()
+            if marker_re.match(current) and normalized_lines and normalized_lines[-1] != "":
+                normalized_lines.append("")
+            normalized_lines.append(current)
+
+        return "\n".join(normalized_lines).strip()
+
+    def _standardize_option_solution_final_answer(self, question_text, solution, resolved_option=None):
+        if not solution or not self._current_options():
+            return solution
+
+        if not resolved_option:
+            explicit_option = extract_final_answer_option_letter(solution, allowed=self._allowed_option_letters())
+            if explicit_option:
+                resolved_option = self._resolve_option_crosscheck(explicit_option, question_text=question_text)
+        if not resolved_option:
+            explicit_option = extract_option_letter(solution, allowed=self._allowed_option_letters())
+            if explicit_option:
+                resolved_option = self._resolve_option_crosscheck(explicit_option, question_text=question_text)
+        if not resolved_option:
+            resolved_option = self._resolve_option_crosscheck(solution, question_text=question_text)
+
+        formatted = self._format_resolved_option_answer(resolved_option)
+        if not formatted:
+            return solution
+
+        canonical_line = f"Final Answer: {formatted}"
+        lines = str(solution).splitlines()
+        answer_line_re = re.compile(
+            rf"^\s*(?:final answer\s*:|the correct answer is|the answer is|answer\s*:?)\s*(?:option\s+)?[{re.escape(self._allowed_option_letters())}]\b.*$",
+            re.IGNORECASE,
+        )
+
+        for index in range(len(lines) - 1, -1, -1):
+            if answer_line_re.match(lines[index].strip()):
+                lines[index] = canonical_line
+                return "\n".join(lines).rstrip()
+
+        return f"{str(solution).rstrip()}\n{canonical_line}".rstrip()
 
     def _format_option_crosscheck_completion(self, resolved_option):
         if not resolved_option:
@@ -928,23 +1155,33 @@ class solver:
         if not options:
             return solution
 
-        resolved_option = self._resolve_option_crosscheck(
-            self.cache.get("wolfram_alpha_search:output"),
-            self.cache.get("program_executor:output"),
-            solution,
-            question_text=question_text,
-        )
+        closest_requested = question_requests_closest_option(question_text)
+        if closest_requested:
+            resolved_option = self._resolve_option_crosscheck(
+                self.cache.get("wolfram_alpha_search:output"),
+                self.cache.get("program_executor:output"),
+                solution,
+                question_text=question_text,
+            )
+        else:
+            # Only let the reverse-check fallback override the draft when
+            # independent tool outputs agree on the same option.
+            resolved_option = self._resolve_independent_option_consensus(question_text=question_text)
         extracted_option = (
             extract_final_answer_option_letter(solution, allowed=self._allowed_option_letters())
             or extract_option_letter(solution, allowed=self._allowed_option_letters())
         )
         needs_reverse_check = bool(
-            question_requests_closest_option(question_text)
+            closest_requested
             or (resolved_option and extracted_option != resolved_option.get("key"))
             or (resolved_option and not extracted_option)
         )
         if not needs_reverse_check:
-            return solution
+            return self._standardize_option_solution_final_answer(
+                question_text,
+                solution,
+                resolved_option=resolved_option,
+            )
 
         verification_prompt = (
             "You are performing a mandatory reverse-check on a multiple-choice math solution.\n"
@@ -972,7 +1209,7 @@ class solver:
             verification_prompt += f"Previous draft:\n{solution}\n\n"
         verification_prompt += (
             "Rewrite the concise solution.\n"
-            'End with exactly one final line in the form "Final Answer: X".\n'
+            'End with exactly one final line in the form "Final Answer: [LETTER]. [OPTION TEXT]". Copy the chosen option text exactly.\n'
         )
 
         corrected = self._generate_solution_text(verification_prompt, min(max(temperature, 0.2), 0.5))
@@ -988,7 +1225,11 @@ class solver:
                 or extract_option_letter(corrected, allowed=self._allowed_option_letters())
             )
             if resolved_option is None or corrected_option == resolved_option.get("key"):
-                return corrected
+                return self._standardize_option_solution_final_answer(
+                    question_text,
+                    corrected,
+                    resolved_option=resolved_option,
+                )
 
         if resolved_option:
             warning = (
@@ -998,14 +1239,30 @@ class solver:
             warnings = self.cache.setdefault("module_warnings", [])
             if warning not in warnings:
                 warnings.append(warning)
-            return (solution or "").rstrip() + f"\nFinal Answer: {resolved_option['key']}"
+            fallback = (solution or "").rstrip()
+            formatted = self._format_resolved_option_answer(resolved_option)
+            if formatted:
+                fallback = f"{fallback}\nFinal Answer: {formatted}".strip()
+            return self._standardize_option_solution_final_answer(
+                question_text,
+                fallback,
+                resolved_option=resolved_option,
+            )
 
-        return corrected or solution
+        return self._standardize_option_solution_final_answer(question_text, corrected or solution)
 
     def _required_env(self, name, feature):
         value = os.getenv(name)
         if value is None or str(value).strip() == "":
             raise RuntimeError(f"Missing required environment variable '{name}' for {feature}")
+        value = str(value).strip()
+        if name.endswith("_FILE_PATH") and not os.path.isabs(value):
+            cwd_candidate = os.path.normpath(value)
+            if os.path.exists(cwd_candidate):
+                return cwd_candidate
+
+            src_candidate = os.path.normpath(os.path.join(os.path.dirname(__file__), value))
+            return src_candidate
         return value
 
     def _optional_env(self, name):
@@ -1037,6 +1294,83 @@ class solver:
 
     def _extract_wolfram_answer_from_result(self, result):
         return extract_wolfram_plaintext_answer(result)
+
+    def _log_available_gpus(self, torch_module):
+        if torch_module.cuda.is_available():
+            num_gpus = torch_module.cuda.device_count()
+            logging.info(f"Number of available GPUs: {num_gpus}")
+            for i in range(num_gpus):
+                gpu = torch_module.cuda.get_device_name(i)
+                gpu_memory = torch_module.cuda.get_device_properties(i).total_memory / 1e9
+                logging.info(f"GPU,Total Memory: {gpu},{gpu_memory}")
+        else:
+            logging.info("No GPU available. Using CPU.")
+
+    def _load_hf_text_generation_backend(
+        self,
+        *,
+        repo,
+        cache_dir_env,
+        local_dir_env,
+        tokenizer_attr,
+        pipeline_attr,
+        log_label,
+    ):
+        runtime = _get_huggingface_runtime()
+        runtime["login"](token=huggingface_token, new_session=False)
+
+        cache_dir = os.environ[cache_dir_env]
+        local_dir = os.environ[local_dir_env]
+        runtime["snapshot_download"](
+            repo_id=repo,
+            cache_dir=cache_dir,
+            local_dir=local_dir,
+            local_dir_use_symlinks=True,
+        )
+
+        logging.info(log_label)
+        torch_module = runtime["torch"]
+        self._log_available_gpus(torch_module)
+
+        tokenizer = runtime["AutoTokenizer"].from_pretrained(local_dir)
+        pipeline = runtime["transformers"].pipeline(
+            "text-generation",
+            model=local_dir,
+            torch_dtype=torch_module.float32,
+            device_map="auto",
+        )
+        setattr(self, tokenizer_attr, tokenizer)
+        setattr(self, pipeline_attr, pipeline)
+
+    def _load_hf_causal_lm_backend(
+        self,
+        *,
+        repo,
+        cache_dir_env,
+        local_dir_env,
+        tokenizer_attr,
+        model_attr,
+        log_label,
+    ):
+        runtime = _get_huggingface_runtime()
+        runtime["login"](token=huggingface_token, new_session=False)
+
+        cache_dir = os.environ[cache_dir_env]
+        local_dir = os.environ[local_dir_env]
+        runtime["snapshot_download"](
+            repo_id=repo,
+            cache_dir=cache_dir,
+            local_dir=local_dir,
+            local_dir_use_symlinks=True,
+        )
+
+        logging.info(log_label)
+        self._log_available_gpus(runtime["torch"])
+
+        tokenizer = runtime["AutoTokenizer"].from_pretrained(local_dir)
+        model = runtime["AutoModelForCausalLM"].from_pretrained(local_dir)
+        setattr(self, tokenizer_attr, tokenizer)
+        setattr(self, model_attr, model)
 
     def __init__(self, args):
         # arguments
@@ -1077,294 +1411,74 @@ class solver:
                 self._disable_model_backend(attr_name, backend_name, env_names)
 
         if self.knowledge_model == 'llama2_13b' and self._disable_model_backend("knowledge_model", "llama2_13b", ['HUGGINGFACE_TOKEN', 'LLAMA2_13B_CACHE_DIR', 'LLAMA2_13B_LOCAL_DIR']):
-            # Huggingface login
-            login(token=huggingface_token,new_session=False)  
-
-            repo = "meta-llama/Llama-2-13b-hf"
-
-            # Set cache dir and local dir 
-            cache_dir = os.environ['LLAMA2_13B_CACHE_DIR']
-            local_dir = os.environ['LLAMA2_13B_LOCAL_DIR']
-
-            snapshot_download(repo_id=repo,cache_dir=cache_dir,local_dir=local_dir,local_dir_use_symlinks=True)
-
-            # path to model
-            logging.info("=====Running Llama2-13B-hf========")
-
-            # Check if CUDA (GPU) is available 
-            if torch.cuda.is_available():
-                    # Get the number of available GPUs
-                    num_gpus = torch.cuda.device_count()
-                    logging.info(f"Number of available GPUs: {num_gpus}")
-                    # Iterate through available GPUs and print information about each
-                    for i in range(num_gpus):
-                        gpu = torch.cuda.get_device_name(i)
-                        gpu_memory = torch.cuda.get_device_properties(i).total_memory / 1e9  # in GB
-                        logging.info(f"GPU,Total Memory: {gpu},{gpu_memory}")
-            else:
-                    logging.info("No GPU available. Using CPU.")
-
-            
-            # Define the tokenizer of python generator module
-            self.knowledge_tokenizer = AutoTokenizer.from_pretrained(local_dir)
-
-            
-            # Define the model pipeline of the python generator module
-            self.knowledge_pipeline = transformers.pipeline(
-            "text-generation",
-            model=local_dir,
-            torch_dtype=torch.float32,
-            device_map="auto",
-        
+            self._load_hf_text_generation_backend(
+                repo="meta-llama/Llama-2-13b-hf",
+                cache_dir_env="LLAMA2_13B_CACHE_DIR",
+                local_dir_env="LLAMA2_13B_LOCAL_DIR",
+                tokenizer_attr="knowledge_tokenizer",
+                pipeline_attr="knowledge_pipeline",
+                log_label="=====Running Llama2-13B-hf========",
             )
-            
+
         if self.knowledge_model == 'llama2_7b' and self._disable_model_backend("knowledge_model", "llama2_7b", ['HUGGINGFACE_TOKEN', 'LLAMA2_7B_CACHE_DIR', 'LLAMA2_7B_LOCAL_DIR']):
-            
-            # Huggingface login
-            login(token=huggingface_token,new_session=False)  
-
-            repo = "meta-llama/Llama-2-7b-hf"
-
-            cache_dir = os.environ['LLAMA2_7B_CACHE_DIR']
-            local_dir = os.environ['LLAMA2_7B_LOCAL_DIR']
-
-            snapshot_download(repo_id=repo,cache_dir=cache_dir,local_dir=local_dir,local_dir_use_symlinks=True)
-
-            # Path to model
-            logging.info("=====Running Llama2-7B-hf========")
-
-            # Check if CUDA (GPU) is available 
-            if torch.cuda.is_available():
-                    # Get the number of available GPUs
-                    num_gpus = torch.cuda.device_count()
-                    logging.info(f"Number of available GPUs: {num_gpus}")
-                    # Iterate through available GPUs and print information about each
-                    for i in range(num_gpus):
-                        gpu = torch.cuda.get_device_name(i)
-                        gpu_memory = torch.cuda.get_device_properties(i).total_memory / 1e9  # in GB
-                        logging.info(f"GPU,Total Memory: {gpu},{gpu_memory}")
-            else:
-                    logging.info("No GPU available. Using CPU.")
-
-            # Define the tokenizer of python generator module
-            self.knowledge_tokenizer = AutoTokenizer.from_pretrained(local_dir)
-
-            
-            # Define the model pipeline of the python generator module
-            self.knowledge_pipeline = transformers.pipeline(
-            "text-generation",
-            model=local_dir,
-            torch_dtype=torch.float32,
-            device_map="auto",
-        
+            self._load_hf_text_generation_backend(
+                repo="meta-llama/Llama-2-7b-hf",
+                cache_dir_env="LLAMA2_7B_CACHE_DIR",
+                local_dir_env="LLAMA2_7B_LOCAL_DIR",
+                tokenizer_attr="knowledge_tokenizer",
+                pipeline_attr="knowledge_pipeline",
+                log_label="=====Running Llama2-7B-hf========",
             )
-            
-            
 
         if self.python_model == 'code_llama7b_python' and self._disable_model_backend("python_model", "code_llama7b_python", ['HUGGINGFACE_TOKEN', 'CODELLAMA_7B_PYTHON_CACHE_DIR', 'CODELLAMA_7B_PYTHON_LOCAL_DIR']):
-
-            # Huggingface login
-            login(token=huggingface_token,new_session=False)  
-
-            repo = "codellama/CodeLlama-7b-Python-hf"
-            cache_dir = os.environ['CODELLAMA_7B_PYTHON_CACHE_DIR']
-            local_dir = os.environ['CODELLAMA_7B_PYTHON_LOCAL_DIR']
-            snapshot_download(repo_id=repo,cache_dir=cache_dir,local_dir=local_dir,local_dir_use_symlinks=True)
-
-            # Path to model
-            logging.info("=====Running CodeLLama-7B-Python========")
-
-            # Check if CUDA (GPU) is available 
-            if torch.cuda.is_available():
-                    # Get the number of available GPUs
-                    num_gpus = torch.cuda.device_count()
-                    logging.info(f"Number of available GPUs: {num_gpus}")
-                    # Iterate through available GPUs and print information about each
-                    for i in range(num_gpus):
-                        gpu = torch.cuda.get_device_name(i)
-                        gpu_memory = torch.cuda.get_device_properties(i).total_memory / 1e9  # in GB
-                        logging.info(f"GPU,Total Memory: {gpu},{gpu_memory}")
-            else:
-                    logging.info("No GPU available. Using CPU.")
-
-           
-            # Define the tokenizer of python generator module
-            self.python_tokenizer = AutoTokenizer.from_pretrained(local_dir)
-
-            
-            # Define the model pipeline of the python generator module
-            self.python_pipeline = transformers.pipeline(
-            "text-generation",
-            model=local_dir,
-            torch_dtype=torch.float32,
-            device_map="auto",
-        
+            self._load_hf_text_generation_backend(
+                repo="codellama/CodeLlama-7b-Python-hf",
+                cache_dir_env="CODELLAMA_7B_PYTHON_CACHE_DIR",
+                local_dir_env="CODELLAMA_7B_PYTHON_LOCAL_DIR",
+                tokenizer_attr="python_tokenizer",
+                pipeline_attr="python_pipeline",
+                log_label="=====Running CodeLLama-7B-Python========",
             )
-            
+
         if self.python_model == 'code_llama13b_python' and self._disable_model_backend("python_model", "code_llama13b_python", ['HUGGINGFACE_TOKEN', 'CODELLAMA_13B_PYTHON_CACHE_DIR', 'CODELLAMA_13B_PYTHON_LOCAL_DIR']):
-
-            # Huggingface login
-            login(token=huggingface_token,new_session=False)  
-            repo = "codellama/CodeLlama-13b-Python-hf"
-
-            cache_dir = os.environ['CODELLAMA_13B_PYTHON_CACHE_DIR']
-            local_dir = os.environ['CODELLAMA_13B_PYTHON_LOCAL_DIR']
-      
-
-            snapshot_download(repo_id=repo,cache_dir=cache_dir,local_dir=local_dir,local_dir_use_symlinks=True)
-
-            # Path to model
-            logging.info("=====Running CodeLLama-13B-python========")
-
-            # Check if CUDA (GPU) is available 
-            if torch.cuda.is_available():
-                    # Get the number of available GPUs
-                    num_gpus = torch.cuda.device_count()
-                    logging.info(f"Number of available GPUs: {num_gpus}")
-                    # Iterate through available GPUs and print information about each
-                    for i in range(num_gpus):
-                        gpu = torch.cuda.get_device_name(i)
-                        gpu_memory = torch.cuda.get_device_properties(i).total_memory / 1e9  # in GB
-                        logging.info(f"GPU,Total Memory: {gpu},{gpu_memory}")
-            else:
-                    logging.info("No GPU available. Using CPU.")
-
-          
-            # Define the tokenizer of python generator module
-            self.python_tokenizer = AutoTokenizer.from_pretrained(local_dir)
-
-            
-            # Define the model pipeline of the python generator module
-            self.python_pipeline = transformers.pipeline(
-            "text-generation",
-            model=local_dir,
-            torch_dtype=torch.float32,
-            device_map="auto",
-        
+            self._load_hf_text_generation_backend(
+                repo="codellama/CodeLlama-13b-Python-hf",
+                cache_dir_env="CODELLAMA_13B_PYTHON_CACHE_DIR",
+                local_dir_env="CODELLAMA_13B_PYTHON_LOCAL_DIR",
+                tokenizer_attr="python_tokenizer",
+                pipeline_attr="python_pipeline",
+                log_label="=====Running CodeLLama-13B-python========",
             )
-           
 
         if self.python_model == 'code_llama34b' and self._disable_model_backend("python_model", "code_llama34b", ['HUGGINGFACE_TOKEN', 'CODELLAMA_34B_CACHE_DIR', 'CODELLAMA_34B_LOCAL_DIR']):
-
-            # Huggingface login
-            login(token=huggingface_token,new_session=False)  
-
-            repo = "Phind/Phind-CodeLlama-34B-v2"
-            cache_dir = os.environ['CODELLAMA_34B_CACHE_DIR']
-            local_dir = os.environ['CODELLAMA_34B_LOCAL_DIR']
-          
-            snapshot_download(repo_id=repo,cache_dir=cache_dir,local_dir=local_dir,local_dir_use_symlinks=True)
-
-            # Path to model
-            logging.info("=====Running CodeLLama-34B-V2========")
-
-            # Check if CUDA (GPU) is available 
-            if torch.cuda.is_available():
-                    # Get the number of available GPUs
-                    num_gpus = torch.cuda.device_count()
-                    logging.info(f"Number of available GPUs: {num_gpus}")
-                    # Iterate through available GPUs and print information about each
-                    for i in range(num_gpus):
-                        gpu = torch.cuda.get_device_name(i)
-                        gpu_memory = torch.cuda.get_device_properties(i).total_memory / 1e9  # in GB
-                        logging.info(f"GPU,Total Memory: {gpu},{gpu_memory}")
-            else:
-                    logging.info("No GPU available. Using CPU.")
-
-            
-            # Define the tokenizer of python generator module
-            self.python_tokenizer = AutoTokenizer.from_pretrained(local_dir)
-
-            
-            # Define the model pipeline of the python generator module
-            self.python_pipeline = transformers.pipeline(
-            "text-generation",
-            model=local_dir,
-            torch_dtype=torch.float32,
-            device_map="auto",
-        
+            self._load_hf_text_generation_backend(
+                repo="Phind/Phind-CodeLlama-34B-v2",
+                cache_dir_env="CODELLAMA_34B_CACHE_DIR",
+                local_dir_env="CODELLAMA_34B_LOCAL_DIR",
+                tokenizer_attr="python_tokenizer",
+                pipeline_attr="python_pipeline",
+                log_label="=====Running CodeLLama-34B-V2========",
             )
-
 
         if self.python_model =='code_llama34b_pythonV1' and self._disable_model_backend("python_model", "code_llama34b_pythonV1", ['HUGGINGFACE_TOKEN', 'CODELLAMA_34B_PYTHONV1_CACHE_DIR', 'CODELLAMA_34B_PYTHONV1_LOCAL_DIR']) :
-
-            # Huggingface login
-            login(token=huggingface_token,new_session=False)  
-
-            repo = "Phind/Phind-CodeLlama-34B-Python-v1"
-
-            cache_dir = os.environ['CODELLAMA_34B_PYTHONV1_CACHE_DIR']
-            local_dir = os.environ['CODELLAMA_34B_PYTHONV1_LOCAL_DIR']
-          
-
-            snapshot_download(repo_id=repo,cache_dir=cache_dir,local_dir=local_dir,local_dir_use_symlinks=True)
-
-            # Path to model
-            logging.info("=====Running CodeLLama-34B-Python-V1========")
-
-            # Check if CUDA (GPU) is available 
-            if torch.cuda.is_available():
-                    # Get the number of available GPUs
-                    num_gpus = torch.cuda.device_count()
-                    logging.info(f"Number of available GPUs: {num_gpus}")
-                    # Iterate through available GPUs and print information about each
-                    for i in range(num_gpus):
-                        gpu = torch.cuda.get_device_name(i)
-                        gpu_memory = torch.cuda.get_device_properties(i).total_memory / 1e9  # in GB
-                        logging.info(f"GPU,Total Memory: {gpu},{gpu_memory}")
-            else:
-                    logging.info("No GPU available. Using CPU.")
-
-            # Define the tokenizer of python generator module
-            self.python_tokenizer = AutoTokenizer.from_pretrained(local_dir)
-
-            
-            # Define the model pipeline of the python generator module
-            self.python_pipeline = transformers.pipeline(
-            "text-generation",
-            model=local_dir,
-            torch_dtype=torch.float32,
-            device_map="auto",
-        
+            self._load_hf_text_generation_backend(
+                repo="Phind/Phind-CodeLlama-34B-Python-v1",
+                cache_dir_env="CODELLAMA_34B_PYTHONV1_CACHE_DIR",
+                local_dir_env="CODELLAMA_34B_PYTHONV1_LOCAL_DIR",
+                tokenizer_attr="python_tokenizer",
+                pipeline_attr="python_pipeline",
+                log_label="=====Running CodeLLama-34B-Python-V1========",
             )
 
-        
         if self.python_model == 'wizardcoder_34B' and self._disable_model_backend("python_model", "wizardcoder_34B", ['HUGGINGFACE_TOKEN', 'WIZARDCODER_34B_PYTHON_CACHE_DIR', 'WIZARDCODER_34B_PYTHON_LOCAL_DIR']):
-            
-            # Huggingface login
-            login(token=huggingface_token,new_session=False)  
-            repo = "WizardLM/WizardCoder-Python-34B-V1.0"
-
-            
-            cache_dir = os.environ['WIZARDCODER_34B_PYTHON_CACHE_DIR']
-            local_dir = os.environ['WIZARDCODER_34B_PYTHON_LOCAL_DIR']
-          
-        
-
-            snapshot_download(repo_id=repo,cache_dir=cache_dir,local_dir=local_dir,local_dir_use_symlinks=True)
-
-            # Path to model
-            logging.info("=====Running Wizard-Coder-34B========")
-
-            # Check if CUDA (GPU) is available 
-            if torch.cuda.is_available():
-                    # Get the number of available GPUs
-                    num_gpus = torch.cuda.device_count()
-                    logging.info(f"Number of available GPUs: {num_gpus}")
-                    # Iterate through available GPUs and print information about each
-                    for i in range(num_gpus):
-                        gpu = torch.cuda.get_device_name(i)
-                        gpu_memory = torch.cuda.get_device_properties(i).total_memory / 1e9  # in GB
-                        logging.info(f"GPU,Total Memory: {gpu},{gpu_memory}")
-            else:
-                    logging.info("No GPU available. Using CPU.")
-
-            
-            # Define the tokenizer of python generator module
-            self.python_tokenizer = AutoTokenizer.from_pretrained(local_dir)
-
-            # Define the model 
-            self.model_code = AutoModelForCausalLM.from_pretrained(local_dir)
+            self._load_hf_causal_lm_backend(
+                repo="WizardLM/WizardCoder-Python-34B-V1.0",
+                cache_dir_env="WIZARDCODER_34B_PYTHON_CACHE_DIR",
+                local_dir_env="WIZARDCODER_34B_PYTHON_LOCAL_DIR",
+                tokenizer_attr="python_tokenizer",
+                model_attr="model_code",
+                log_label="=====Running Wizard-Coder-34B========",
+            )
             
 
     def _load_examples_for_dataset(self, dataset_name):
@@ -1678,34 +1792,50 @@ class solver:
         if extracted_answer not in (None, ""):
             return extracted_answer
 
+        query_settings = self._query_generation_settings()
         return resolve_wolfram_answer(
             q,
             res,
-            chat_callable=lambda prompt, max_tokens: self._call_wolfram_llm(prompt, temperature=0.5, max_tokens=max_tokens),
-            max_tokens=5000,
-            wolfram_model=self.wolfram_model,
-            text_davinci003_callable=lambda prompt, temperature, max_tokens: get_textdavinci003_response(
+            chat_callable=lambda prompt, max_tokens: self._call_wolfram_llm(
                 prompt,
-                temperature=temperature,
                 max_tokens=max_tokens,
+                patience=query_settings["patience"],
             ),
-            gemini_callable=get_gemini_response,
+            max_tokens=query_settings["max_tokens"],
+            wolfram_model=self.wolfram_model,
+            text_completion_callable=lambda prompt, max_tokens: self._call_wolfram_llm(
+                prompt,
+                max_tokens=max_tokens,
+                patience=query_settings["patience"],
+            ),
+            gemini_callable=lambda prompt: self._call_wolfram_llm(
+                prompt,
+                patience=query_settings["patience"],
+            ),
         )
 
-    def _call_wolfram_llm(self, prompt, temperature=0.2, max_tokens=800):
-        if self.wolfram_model == 'text_davinci_003':
-            return get_textdavinci003_response(prompt, temperature=temperature, max_tokens=max_tokens)
-        if self.wolfram_model == 'gemini':
-            return get_gemini_response(prompt)
-        messages = [{"role": "user", "content": prompt}]
-        return get_chat_response(messages=messages, temperature=temperature, max_tokens=max_tokens)
+    def _call_wolfram_llm(self, prompt, temperature=None, max_tokens=None, patience=None):
+        query_settings = self._query_generation_settings()
+        return self._call_text_backend(
+            self.wolfram_model,
+            prompt,
+            temperature=query_settings["temperature"] if temperature is None else temperature,
+            max_tokens=query_settings["max_tokens"] if max_tokens is None else max_tokens,
+            patience=query_settings["patience"] if patience is None else patience,
+        )
 
     def _generate_wolfram_initial_query(self, full_prompt):
+        query_settings = self._query_generation_settings()
         tries = 0
         last_response = None
 
-        while tries < 3:
-            last_response = self._call_wolfram_llm(full_prompt, temperature=0.5, max_tokens=600)
+        while tries < query_settings["patience"]:
+            last_response = self._call_wolfram_llm(
+                full_prompt,
+                temperature=query_settings["temperature"],
+                max_tokens=query_settings["max_tokens"],
+                patience=10,
+            )
             tries += 1
             parsed = parse_wolfram_query_response(last_response)
             if parsed and parsed.get("query"):
@@ -1713,13 +1843,29 @@ class solver:
 
         return None, last_response
 
-    def _plan_wolfram_next_step(self, question_text, trace):
+    def _plan_wolfram_next_step(self, question_text, trace, remaining_option_keys=None):
+        query_settings = self._query_generation_settings()
         prompt = build_wolfram_next_step_prompt(question_text, trace)
+        if remaining_option_keys:
+            checked_keys = self._wolfram_checked_option_keys(trace)
+            prompt += (
+                "\nAdditional constraint:\n"
+                "- The current Wolfram strategy is checking answer choices one by one.\n"
+                f"- Options already checked: {', '.join(checked_keys) if checked_keys else 'none'}.\n"
+                f"- Options still unchecked: {', '.join(remaining_option_keys)}.\n"
+                "- Do not return FINAL until every unchecked option has been explicitly evaluated.\n"
+                "- Return Status: CONTINUE and provide the next Wolfram query for the next unchecked option.\n"
+            )
         tries = 0
         last_response = None
 
-        while tries < 3:
-            last_response = self._call_wolfram_llm(prompt, temperature=0.2, max_tokens=700)
+        while tries < query_settings["patience"]:
+            last_response = self._call_wolfram_llm(
+                prompt,
+                temperature=query_settings["temperature"],
+                max_tokens=query_settings["max_tokens"],
+                patience=10,
+            )
             tries += 1
             parsed = parse_wolfram_next_step_response(last_response)
             if parsed is not None:
@@ -1798,12 +1944,13 @@ class solver:
         final_query = None
         last_error = None
         resolved_wolfram_option = None
+        max_wolfram_steps = max(4, len(self._current_options() or []) + 1)
 
         if q:
             current_query = q
             seen_query_signatures = set()
 
-            for step_index in range(1, 5):
+            for step_index in range(1, max_wolfram_steps + 1):
                 normalized_query = normalize_wolfram_query_signature(current_query)
                 if not normalized_query:
                     last_error = "Empty Wolfram Alpha query"
@@ -1813,7 +1960,7 @@ class solver:
                     break
                 seen_query_signatures.add(normalized_query)
 
-                query_result = query_wolfram_alpha(app_id, current_query, logger=logging)
+                query_result = query_wolfram_alpha(app_id, current_query, logger=logging.getLogger(__name__))
                 executed_query = query_result.get("query") or current_query
                 final_query = executed_query
                 res = query_result.get("result")
@@ -1841,6 +1988,28 @@ class solver:
                 decision, _ = self._plan_wolfram_next_step(question_text, trace)
                 if decision is None:
                     last_error = "Wolfram planner could not determine whether the requested final quantity had been reached"
+                    break
+
+                remaining_option_keys = self._wolfram_remaining_option_keys(trace)
+                if decision.get("status") == "FINAL" and remaining_option_keys:
+                    replan_message = (
+                        "Option-by-option Wolfram check is incomplete. "
+                        + f"Remaining options: {', '.join(remaining_option_keys)}."
+                    )
+                    trace[-1]["completion_thought"] = replan_message
+                    decision, _ = self._plan_wolfram_next_step(
+                        question_text,
+                        trace,
+                        remaining_option_keys=remaining_option_keys,
+                    )
+                    if decision and decision.get("status") == "CONTINUE" and decision.get("next_query"):
+                        thought = decision.get("thought", replan_message)
+                        current_query = decision.get("next_query")
+                        continue
+                    last_error = (
+                        "Wolfram planner tried to finalize before evaluating all remaining options: "
+                        + ", ".join(remaining_option_keys)
+                    )
                     break
 
                 if decision.get("status") == "FINAL":
@@ -2336,8 +2505,9 @@ class solver:
                 solution,
                 _temperature,
             )
+            solution = self._normalize_solution_step_breaks(solution)
 
-            
+             
             #pattern = re.compile(r"[Tt]he answer is ([A-Z])")      # "The answer is XXXXX.",
             #res = pattern.findall(solution)
             
@@ -2368,7 +2538,7 @@ class solver:
         
         # Set up Bing credentials
         endpoint = self._optional_env('BING_API_ENDPOINT')
-        count = os.getenv('BING_API_COUNT', '5')
+        count = self._configured_max_tokens('bing_count', int(os.getenv('BING_API_COUNT', '5')))
         bing_api_key = self._optional_env('BING_API_KEY')
         if endpoint is None or bing_api_key is None:
             return self._skip_optional_module("bing_search", "BING_API_ENDPOINT or BING_API_KEY is not configured")
@@ -2411,17 +2581,19 @@ class solver:
         ]
 
         # Query for Bing concept search using LLM-generated query
-        
-        num_tries = 3
+        query_settings = self._query_generation_settings()
+        extraction_settings = self._knowledge_extraction_settings()
+        num_tries = query_settings["patience"]
         f = 0
         while(f<num_tries):
             f+=1
-            if self.bing_model == 'text_davinci_003': # Check text-davinci-003
-                query_output = get_textdavinci003_response(full_prompt,temperature=0.5, max_tokens=5000)
-            elif self.bing_model == 'gemini':
-                query_output = get_gemini_response(full_prompt)
-            else:    
-                query_output = get_chat_response(messages, temperature=0.5, max_tokens=5000)
+            query_output = self._call_text_backend(
+                self.bing_model,
+                full_prompt,
+                temperature=query_settings["temperature"],
+                max_tokens=query_settings["max_tokens"],
+                patience=1,
+            )
             
             if query_output.find("Query:")!= -1:
                 break
@@ -2469,12 +2641,13 @@ class solver:
         ]
 
         
-        if self.bing_model == 'text_davinci_003':  # Check text-davinci-003
-            info_bing1 = get_textdavinci003_response(full_prompt_extract1,temperature=0.5, max_tokens=5000)
-        elif self.bing_model == 'gemini':
-            info_bing1 = get_gemini_response(full_prompt_extract1)
-        else:
-            info_bing1 = get_chat_response(messages1, temperature=0.5, max_tokens=500)
+        info_bing1 = self._call_text_backend(
+            self.bing_model,
+            full_prompt_extract1,
+            temperature=extraction_settings["temperature"],
+            max_tokens=extraction_settings["max_tokens"],
+            patience=1,
+        )
         
             
         messages2=[
@@ -2482,12 +2655,13 @@ class solver:
         ]
 
         
-        if self.bing_model == 'text_davinci_003': # Check text-davinci-003
-            info_bing2 = get_textdavinci003_response(full_prompt_extract2,temperature=0.5, max_tokens=5000)
-        elif self.bing_model == 'gemini':
-            info_bing2 = get_gemini_response(full_prompt_extract2)
-        else:
-            info_bing2 = get_chat_response(messages2, temperature=0.5, max_tokens=5000)
+        info_bing2 = self._call_text_backend(
+            self.bing_model,
+            full_prompt_extract2,
+            temperature=extraction_settings["temperature"],
+            max_tokens=extraction_settings["max_tokens"],
+            patience=1,
+        )
         
         
         # Concatenate bing responses from query 'question' and 'query2' using context
