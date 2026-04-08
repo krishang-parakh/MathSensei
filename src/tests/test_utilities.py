@@ -171,41 +171,41 @@ class TestUtilities(unittest.TestCase):
 
         with mock.patch("utilities._chat_backend_mode", return_value="openai"), mock.patch(
             "utilities._get_standard_openai_client", return_value=fake_client
-        ), mock.patch("utilities.MODEL_NAME", "gpt-5.1-codex-mini"):
+        ), mock.patch("utilities.MODEL_NAME", "gpt-5-nano"):
             output = _chat_completion(
                 messages=[{"role": "system", "content": "Reply briefly."}, {"role": "user", "content": "Say OK"}],
                 temperature=0.3,
-                max_tokens=12,
+                max_tokens=2000,
                 stop=["<STOP>"],
             )
 
         self.assertEqual(output, "OK")
         response_api.create.assert_called_once()
         create_kwargs = response_api.create.call_args.kwargs
-        self.assertEqual(create_kwargs["model"], "gpt-5.1-codex-mini")
+        self.assertEqual(create_kwargs["model"], "gpt-5-nano")
         self.assertEqual(create_kwargs["max_output_tokens"], 12)
         self.assertEqual(create_kwargs["input"][0]["role"], "system")
 
     def test_chat_completion_falls_back_when_requested_model_does_not_exist(self):
         response_api = mock.Mock()
         response_api.create.side_effect = [
-            RuntimeError("Error code: 400 - {'error': {'message': \"The requested model 'gpt-5.3-chat' does not exist.\", 'code': 'model_not_found'}}"),
+            RuntimeError("Error code: 400 - {'error': {'message': \"The requested model 'gpt-5-nano' does not exist.\", 'code': 'model_not_found'}}"),
             types.SimpleNamespace(output_text="Recovered"),
         ]
         fake_client = types.SimpleNamespace(responses=response_api)
 
         with mock.patch("utilities._chat_backend_mode", return_value="openai"), mock.patch(
             "utilities._get_standard_openai_client", return_value=fake_client
-        ), mock.patch("utilities.MODEL_NAME", "gpt-5.3-chat"):
+        ), mock.patch("utilities.MODEL_NAME", "gpt-5-nano"):
             output = _chat_completion(
                 messages=[{"role": "user", "content": "Say hi"}],
                 temperature=0.3,
-                max_tokens=12,
+                max_tokens=2000,
             )
 
         self.assertEqual(output, "Recovered")
-        self.assertEqual(response_api.create.call_args_list[0].kwargs["model"], "gpt-5.3-chat")
-        self.assertEqual(response_api.create.call_args_list[1].kwargs["model"], "gpt-5.1-codex-mini")
+        self.assertEqual(response_api.create.call_args_list[0].kwargs["model"], "gpt-5-nano")
+        self.assertEqual(response_api.create.call_args_list[1].kwargs["model"], "gpt-5-nano")
 
     def test_chat_completion_azure_prefers_max_completion_tokens(self):
         create_api = mock.Mock()
@@ -220,7 +220,7 @@ class TestUtilities(unittest.TestCase):
             output = _chat_completion_azure(
                 messages=[{"role": "user", "content": "Reply with exactly OK"}],
                 temperature=0.2,
-                max_tokens=16,
+                max_tokens=2000,
             )
 
         self.assertEqual(output, "Azure OK")
@@ -247,7 +247,7 @@ class TestUtilities(unittest.TestCase):
             output = _chat_completion_azure(
                 messages=[{"role": "user", "content": "Reply with exactly OK"}],
                 temperature=0.5,
-                max_tokens=16,
+                max_tokens=2000,
             )
 
         self.assertEqual(output, "Azure fallback OK")

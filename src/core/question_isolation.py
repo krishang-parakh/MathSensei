@@ -158,10 +158,14 @@ def build_option_wolfram_demo_prompt(option_letters):
         "- If the question is geometry, do not turn the figure into invented coordinates or use hidden diagram coordinates unless the problem explicitly gives coordinates.\n"
         "- For closest, nearest, approximate, or estimate questions, prefer computing the actual target quantity first so it can be compared against every option.\n"
         "- If the options are expressions, plan to evaluate the expressions rather than inventing your own rounding rule.\n"
+        "- AVOID generating vague or empty queries (e.g., just a number with no operation, or natural language questions).\n"
+        "- AVOID repeating failed queries - if a query doesn't return useful results, try reformulating it.\n"
+        "- Ensure your query uses mathematical operators and symbols, not natural language.\n"
+        "- If solving an equation, write 'solve [equation] for [variable]' explicitly.\n"
         "Respond using exactly this format:\n"
-        "Thought: <brief thought>\n"
-        "Answer: <brief confirmation>\n"
-        "Final Query: <single Wolfram Alpha query>\n"
+        "Thought: <brief thought about query strategy>\n"
+        "Answer: <brief confirmation of approach>\n"
+        "Final Query: <single concrete Wolfram Alpha query with math operators>\n"
     )
 
 

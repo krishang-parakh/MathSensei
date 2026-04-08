@@ -126,33 +126,44 @@ def _resolve_option_entry(priority_texts, fallback_texts, options, question_text
     """
     Resolve texts to an option entry using a natural, linear process:
     1. Try to find explicit option letters in priority texts first
-    2. Then try full resolution on priority+fallback texts
-    3. Return the first match, preferring explicit letters and substantive matches
-    
-    This is intentionally simple and depends on select_option_from_values() for main logic.
+    2. Then try full resolution on priority + fallback texts
+    3. If explicit option text conflicts with fallback-derived values, prefer the fallback-derived option
     """
     if not options:
         return None
 
     allowed = _allowed_option_letters(options)
 
-    # STEP 1: Quick scan for explicit option letters (most authoritative)
+    explicit_entry = None
     for text in _clean_texts(*priority_texts):
         explicit = extract_final_answer_option_letter(text, allowed=allowed)
+        cleaned_text = clean_answer_text(text)
+        if not explicit and cleaned_text and len(cleaned_text) <= 80 and "\n" not in cleaned_text:
+            explicit = extract_option_letter(cleaned_text, allowed=allowed)
         entry = option_entry_for_key(options, explicit)
         if entry:
-            return entry
+            explicit_entry = entry
+            break
 
-    # STEP 2: Comprehensive resolution on priority + fallback texts
-    # This handles exact matches, numeric equivalence, and closest-numeric
     combined_texts = _clean_texts(*priority_texts, *fallback_texts)
     matched = select_option_from_values(
         combined_texts,
         options,
         question_text=question_text,
-        allow_nearest=True,  # Allow closest matching when appropriate
+        allow_nearest=True,
     )
-    
+
+    if explicit_entry:
+        fallback_match = select_option_from_values(
+            _clean_texts(*fallback_texts),
+            options,
+            question_text=question_text,
+            allow_nearest=True,
+        )
+        if fallback_match and fallback_match.get("key") != explicit_entry.get("key"):
+            return fallback_match
+        return explicit_entry
+
     return matched
 
 
@@ -173,7 +184,7 @@ def resolve_final_answer_bundle(record):
     if uses_option_answers(record):
         entry = _resolve_option_entry(
             [solution, explicit],
-            [explicit, *fallback_texts],
+            fallback_texts,
             options,
             question_text=question_text,
         )

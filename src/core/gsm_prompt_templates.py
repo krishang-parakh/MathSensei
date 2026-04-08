@@ -90,10 +90,13 @@ def build_gsm_wolfram_demo_prompt():
         "- Use explicit parentheses for multi-step arithmetic so the intended order of operations is unambiguous.\n"
         "- The final query should evaluate directly to the requested numeric quantity.\n"
         "- If a variable is needed, use a generic variable like x rather than a copied story-specific name.\n"
+        "- AVOID generating vague or empty queries (e.g., a bare number with no operation, or natural language).\n"
+        "- AVOID repeating the same query if it failed to produce useful results.\n"
+        "- Use mathematical operators (+, -, *, /, ^) and functions explicitly.\n"
         "Respond using exactly this format:\n"
-        "Thought: <brief thought>\n"
-        "Answer: <brief confirmation>\n"
-        "Final Query: <single Wolfram Alpha query>\n"
+        "Thought: <brief thought about the arithmetic>\n"
+        "Answer: <brief confirmation of the calculation>\n"
+        "Final Query: <single concrete Wolfram Alpha query with all operators written out>\n"
     )
 
 

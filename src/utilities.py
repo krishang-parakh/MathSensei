@@ -144,7 +144,7 @@ MODEL_NAME = (
     or _clean_env_value(_get_env("MODEL_NAME"))
     or AZURE_DEPLOYMENT_NAME
     or _clean_env_value(_get_env("DEFAULT_ENGINE"))
-    or "gpt-5.3-chat"
+    or "gpt-5-nano"
 )
 
 if STANDARD_OPENAI_API_KEY and AZURE_ENDPOINT and AZURE_DEPLOYMENT_NAME:

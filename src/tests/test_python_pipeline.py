@@ -56,6 +56,17 @@ Solution:
         self.assertTrue(cleaned.startswith("from sympy import *"))
         self.assertEqual(final_output_line(execute_python(cleaned)), "22")
 
+    def test_sanitize_normalizes_unicode_fractions_in_code(self):
+        raw = """
+from sympy import *
+x = ½
+print(x)
+"""
+        cleaned = sanitize_generated_python(raw)
+        self.assertNotIn("½", cleaned)
+        self.assertIn("1/2", cleaned)
+        self.assertEqual(final_output_line(execute_python(cleaned)), "0.5")
+
     def test_sanitize_removes_inline_instruction_lines(self):
         raw = """
 from sympy import *

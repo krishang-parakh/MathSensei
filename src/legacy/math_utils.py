@@ -205,9 +205,9 @@ def last_boxed_only(sample):
     return (q, a)
 
 def last_boxed_only_string(string):
-    idx = string.rfind("\\boxed")
+    idx = string.find("\\boxed")
     if idx < 0:
-        idx = string.rfind("\\fbox")
+        idx = string.find("\\fbox")
         if idx < 0:
             return None
 

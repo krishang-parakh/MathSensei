@@ -1,6 +1,7 @@
 import re
 import subprocess
 import sys
+import unicodedata
 
 
 LEADING_NOISE_PREFIXES = (
@@ -173,6 +174,47 @@ def _normalize_code_fences(text):
     return normalized
 
 
+def _normalize_unicode_in_code(text):
+    if text is None:
+        return ""
+
+    normalized = unicodedata.normalize("NFKC", str(text))
+    replacements = {
+        "\u00A0": " ",
+        "\u2013": "-",
+        "\u2014": "-",
+        "\u2212": "-",
+        "\u2018": "'",
+        "\u2019": "'",
+        "\u201C": '"',
+        "\u201D": '"',
+        "\u2026": "...",
+        "\u00BC": "1/4",
+        "\u00BD": "1/2",
+        "\u00BE": "3/4",
+        "\u2153": "1/3",
+        "\u2154": "2/3",
+        "\u2155": "1/5",
+        "\u2156": "2/5",
+        "\u2157": "3/5",
+        "\u2158": "4/5",
+        "\u2159": "1/6",
+        "\u215A": "5/6",
+        "\u215B": "1/8",
+        "\u215C": "3/8",
+        "\u215D": "5/8",
+        "\u215E": "7/8",
+        "\u2044": "/",
+        "\u2217": "*",
+        "\u00B7": "*",
+    }
+    for old, new in replacements.items():
+        normalized = normalized.replace(old, new)
+
+    normalized = normalized.replace("\u200B", "").replace("\u200C", "").replace("\u200D", "")
+    return normalized
+
+
 def _is_noise_line(stripped_line):
     lowered = stripped_line.lower()
     if not lowered:
@@ -206,6 +248,7 @@ def sanitize_generated_python(program):
         return ""
 
     text = _normalize_code_fences(program)
+    text = _normalize_unicode_in_code(text)
     lines = text.splitlines()
     cleaned_lines = []
     saw_code = False

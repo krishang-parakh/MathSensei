@@ -1272,41 +1272,17 @@ def _needs_review_reason(record):
     return "One or more tool outputs disagreed or were incomplete."
 
 
-def _needs_review_comparison(record):
-    comparisons = []
-    candidates = [
-        ("Knowledge", _compact_review_text(record.get("knowledge_retrieval_output"))),
-        ("Python", _compact_review_text(record.get("program_output"), prefer_last_line=True) or _compact_review_text(record.get("program_error"), prefer_last_line=True)),
-        ("Wolfram", _compact_review_text(record.get("wolfram_output"), prefer_last_line=True) or _compact_review_text(record.get("wolfram_error"))),
-        ("Final Answer", _compact_review_text(record.get("final_answer"), prefer_last_line=True) or _compact_review_text(record.get("final_generated_solution"), prefer_last_line=True)),
-        ("Expected", _compact_review_text(record.get("gold_answer"), prefer_last_line=True)),
-    ]
-    for label, value in candidates:
-        if value:
-            comparisons.append((label, value))
-    return comparisons
+
 
 
 def _needs_review_panel(record):
     if record.get("status") != "needs-review":
         return ""
 
-    comparison_items = _needs_review_comparison(record)
-    comparison_html = "".join(
-        f"""
-        <div class="review-compare__item">
-          <span class="review-compare__label">{escape(label)}</span>
-          <div class="review-compare__value">{_render_answer_like_html(value) if label in {"Final Answer", "Expected"} else _render_text_html(value, preserve_breaks=False)}</div>
-        </div>
-        """
-        for label, value in comparison_items
-    )
-
     return f"""
     <section class="review-panel">
       <div class="review-panel__title">Needs Review</div>
       <p class="review-panel__reason">{_render_text_html(_needs_review_reason(record), preserve_breaks=False)}</p>
-      {'<div class="review-compare">' + comparison_html + '</div>' if comparison_html else ''}
     </section>
     """
 
@@ -1316,7 +1292,16 @@ def _method_answer_candidates(record):
     problem = record.get("problem")
     candidates = []
     source_specs = [
-        ("Solution Generator", {"solution": record.get("solution_generator_output") or record.get("final_generated_solution"), "options": options, "problem": problem}),
+        (
+            "Solution Generator",
+            {
+                "solution": record.get("solution_generator_output") or record.get("final_generated_solution"),
+                "program_output": record.get("program_output"),
+                "wolfram_output": record.get("wolfram_output"),
+                "options": options,
+                "problem": problem,
+            },
+        ),
         ("Python", {"answer": record.get("program_output"), "options": options, "problem": problem}),
         ("Wolfram", {"answer": record.get("wolfram_output"), "options": options, "problem": problem}),
     ]

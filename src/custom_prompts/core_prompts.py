@@ -371,105 +371,118 @@ Query: What is the sum of angles in a triangle?, How to calculate the measure of
 
 prompt_walpha_kr = SimpleNamespace(
     prompt="""
-Read the following question to generate queries seperated by commas for searching Wolfram Alpha API, that is being used to make specific calculations or solving specific problems. The queries should be mostly mathematical rather than natural language. 
+Read the following question and generate concise, specific Wolfram Alpha queries for calculations or solving problems.
+The queries should be mathematical expressions, NOT natural language. Avoid empty queries or queries without actual computation symbols.
+
+Guidelines for generating good Wolfram queries:
+1. Use mathematical operators and symbols (=, *, /, ^, sqrt, etc.)
+2. Avoid vague or too-general questions
+3. Each query should target a specific calculation or solution
+4. If solving multiple steps, break them into sequential queries
+5. Always include the actual equation or expression to be evaluated/solved
 
 Question: What positive two-digit integer is exactly twice the sum of its digits?
 Knowledge:
-- The question involves understanding of number properties and basic arithmetic operations.
-- A two-digit integer can be expressed as 10a + b, where a and b are its digits.
-- The sum of the digits of a two-digit number is a + b.
-- The condition given in the question, "twice the sum of its digits", can be expressed as 2(a + b).
-- The problem is to find a two-digit number such that 10a + b = 2(a + b).
+- A two-digit integer can be expressed as 10a + b, where a and b are its digits
+- The condition is 10a + b = 2(a + b)
+- Need to solve for a and b where both are digits (1-9 for a, 0-9 for b)
 Query: 
-10a + b = 2(a + b)
+10a + b = 2(a + b), solve for a and b
 
 
-Question: In how many ways can a President, Vice-President, and Treasurer be chosen from a group of $4$ guys and $4$ girls and at least one girl and at least one guy holds at least one of those three positions? One person cannot serve in more than one position.
+Question: In how many ways can a President, Vice-President, and Treasurer be chosen from a group of $4$ guys and $4$ girls and at least one girl and at least one guy holds at least one of those three positions?
 Knowledge:
-- The question involves the concept of permutations in mathematics, specifically choosing 3 people from a group of 8 to fill 3 distinct positions.
-- The order of selection matters in this case, as each position (President, Vice-President, and Treasurer) is unique.
-- The formula for permutations is P(n, r) = n! / (n-r)!, where n is the total number of items, r is the number of items to choose, and "!" denotes factorial.
-- In this case, n = 8 (the total number of people) and r = 3 (the number of positions to fill).
-- The condition that at least one girl and at least one guy must hold at least one of the positions adds a layer of complexity to the problem. This means we must consider cases where there are 1 girl and 2 guys, 2 girls and 1 guy, and 3 girls or 3 guys.
-- We need to calculate total ways of selecting without any restrictions.
-- Then we can subtract the cases of all boys and all girls from above to get answer.
+- Using permutations: P(n,r) = n!/(n-r)!
+- Total ways without restriction: P(8,3)
+- Subtract ways with all boys: P(4,3)
+- Subtract ways with all girls: P(4,3)
 Query: 
-8p3,4p3
+P(8,3) - P(4,3) - P(4,3)
 
 
-Question: A regular tetrahedron is a pyramid with four faces, each of which is an equilateral triangle.\n\nLet $V$ be the volume of a regular tetrahedron whose sides each have length $1$. What is the exact value of $V^2$ ?
+Question: A regular tetrahedron has side length 1. What is the exact value of V^2 where V is the volume?
 Knowledge:
-- A regular tetrahedron is a type of pyramid with four faces, each of which is an equilateral triangle. This means all sides and angles are equal.
-- The formula for the volume of a regular tetrahedron with side length a is V = aÂ³/ (6âˆš2).
-- In this case, the side length a is given as 1. 
-- The question asks for the square of the volume, so we need to square the result of the volume calculation.
+- Formula for tetrahedron volume: V = a^3/(6*sqrt(2))
+- With a=1, calculate V then V^2
 Query: 
-1^3/(6*sqrt(2)),(1^3/(6*sqrt(2)))^2
+(1^3/(6*sqrt(2)))^2
 
 
-
-Question: The smallest distance between the origin and a point on the graph of $y=\\frac{1}{2}x^2-9$ can be expressed as $a$.  Find $a^2$.
+Question: Find the smallest distance between the origin and a point on the graph of y = (1/2)x^2 - 9
 Knowledge:
-- The question involves the concept of distance between two points in a coordinate system. 
-- The distance between the origin and a point (x, y) on the graph is given by the formula âˆš(x^2 + y^2). 
-- Minimizing (x^2 + y^2) is same as minimizing âˆš(x^2 + y^2).  
-- Substitute y = 1/2x^2 - 9 into the equation to get x^2 + (1/2x^2 - 9)^2. 
-- Take derivative of above equation and set it to 0.
+- Distance formula: sqrt(x^2 + y^2)
+- Need to minimize x^2 + ((1/2)x^2 - 9)^2
+- Take derivative and solve for x=0
 Query: 
-D[x^2 + (1/2x^2 - 9)^2], x^3 - 16 x == 0
+minimize x^2 + ((1/2)x^2 - 9)^2
 
 
-Question: What, in degrees, is the measure of the largest angle in $\\triangle PQR?$\n\n[asy]\ndraw((0,0)--(-1.3,4)--(7,0)--cycle);\nlabel(\"$P$\",(-1.3,4),NW); label(\"$Q$\",(0,0),SW); label(\"$R$\",(7,0),SE);\n\nlabel(\"$6x^\\circ$\",(0,0),NE); label(\"$x^\\circ$\",(5,0),N); label(\"$3x^\\circ$\",(-.25,3));\n[/asy]
+Question: In a triangle PQR, if the angles are 6x, x, and 3x degrees, find the largest angle
 Knowledge:
-- The question involves the concept of angles in a triangle.
-- In a triangle, the sum of the angles is always 180 degrees.
-- The angles in triangle PQR are given as 6x, x, and 3x degrees.
-- The largest angle in a triangle is the one with the highest value when the values of x are substituted into the expressions for the angles.
+- Sum of angles in a triangle = 180 degrees
+- Need to solve 6x + x + 3x = 180 first
+- Then find which angle is largest
 Query: 
-6 x + 3 x + x == 180
+solve 6x + 3x + x = 180 for x, then 6x
 
 """
 )
 
 
-walpha_prompt = SimpleNamespace(
-    prompt=""" Given a mathematical question, call the Wolfram Alpha tool when needed and find the solution. 
 
+walpha_prompt = SimpleNamespace(
+    prompt=""" Given a mathematical question, generate effective Wolfram Alpha queries and interpret the results.
+
+IMPORTANT GUIDELINES:
+1. Generate queries that directly compute the answer, not exploratory queries
+2. If a query returns no answer or an incomplete answer, reformulate and try again
+3. Always interpret Wolfram results in context of the original question
+4. For multi-step problems, chain queries logically to build towards the final answer
+5. Avoid repetitive queries - if a query fails, try a different formulation
+6. When Wolfram returns multiple assumptions, evaluate which is most relevant to the question
+
+Examples:
 
 Question: What positive two-digit integer is exactly twice the sum of its digits?
-Wolfram alpha LLM output: 
-Assumption: 10 a + b = 2 (a + b) 
-Answer: b = 8 a
+Analysis:
+- A two-digit number = 10a + b (where a is tens digit, b is units digit)
+- Condition: 10a + b = 2(a + b)
+- Need to find integer solutions where 1 ≤ a ≤ 9 and 0 ≤ b ≤ 9
+Wolfram queries:
+1. "solve 10*a + b = 2*(a + b) for integer a, b"
+2. "10*a + b = 2*(a + b), 1 <= a <= 9, 0 <= b <= 9"
+Result: a = 1, b = 8, so the answer is 18
 
-Question: In how many ways can a President, Vice-President, and Treasurer be chosen from a group of $4$ guys and $4$ girls and at least one girl and at least one guy holds at least one of those three positions? One person cannot serve in more than one position.
-Wolfram alpha LLM output: 
-Assumption: (8!)/((8 - 3)!) 
-Answer: 336
-Assumption: (4!)/((4 - 3)!) 
-Answer: 24
+Question: In how many ways can a President, Vice-President, and Treasurer be chosen from a group of 4 guys and 4 girls with at least one of each gender holding at least one position?
+Analysis:
+- Total ways: P(8,3) = 8!/(8-3)! = 336
+- All boys: P(4,3) = 4!/(4-3)! = 24
+- All girls: P(4,3) = 24
+- Answer: 336 - 24 - 24 = 288
+Wolfram queries:
+1. "P(8,3)" → 336
+2. "P(4,3)" → 24
+3. "336 - 24 - 24" → 288
 
+Question: Let V be the volume of a regular tetrahedron with side length 1. What is V²?
+Analysis:
+- Volume formula: V = a³/(6√2) where a = 1
+- So V = 1/(6√2)
+- V² = 1/(72)
+Wolfram queries:
+1. "(1/(6*sqrt(2)))^2" → 1/72
+Result: 1/72
 
-Question: A regular tetrahedron is a pyramid with four faces, each of which is an equilateral triangle.\n\nLet $V$ be the volume of a regular tetrahedron whose sides each have length $1$. What is the exact value of $V^2$ ?
-Wolfram alpha LLM output: 
-Assumption: 1^3/(6 sqrt(2)) 
-Answer: sqrt(2)/12
-Assumption: (1^3/(6 sqrt(2)))^2 
-Answer: 1/72
-
-
-Question: The smallest distance between the origin and a point on the graph of $y=\\frac{1}{2}x^2-9$ can be expressed as $a$.  Find $a^2$.
-Wolfram alpha LLM output: 
-Assumption: d/dx(x^2 + (x^2/2 - 9)^2) = x (x^2 - 16) 
-Answer: d/dx(x^2 + (x^2/2 - 9)^2) = x (x^2 - 16)
-Assumption: x^3 - 16 x = 0 
-Answer: x = -4
-
-Question: What, in degrees, is the measure of the largest angle in $\\triangle PQR?$\n\n[asy]\ndraw((0,0)--(-1.3,4)--(7,0)--cycle);\nlabel(\"$P$\",(-1.3,4),NW); label(\"$Q$\",(0,0),SW); label(\"$R$\",(7,0),SE);\n\nlabel(\"$6x^\\circ$\",(0,0),NE); label(\"$x^\\circ$\",(5,0),N); label(\"$3x^\\circ$\",(-.25,3));\n[/asy]
-Wolfram alpha LLM output: 
-Assumption: 6 x + 3 x + x = 180 
-Answer: 10 x = 180, x = 18
-
-
+Question: For triangle PQR with angles 6x°, x°, and 3x°, find the largest angle
+Analysis:
+- Sum of angles = 180°
+- 6x + x + 3x = 180
+- 10x = 180, so x = 18
+- Angles: 108°, 18°, 54°
+- Largest: 108°
+Wolfram queries:
+1. "solve 6x + x + 3x = 180" → x = 18
+2. "6*18" → 108 (the largest angle)
 
 """
 )

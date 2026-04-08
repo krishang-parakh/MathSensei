@@ -97,9 +97,9 @@ def remove_boxed(s):
         return None
 
 def last_boxed_only_string(string):
-    idx = string.rfind("\\boxed")
+    idx = string.find("\\boxed")
     if idx < 0:
-        idx = string.rfind("\\fbox")
+        idx = string.find("\\fbox")
         if idx < 0:
             return None
 
@@ -136,9 +136,9 @@ def remove_boxed(s):
         return None
 
 def last_boxed_only_string(string):
-    idx = string.rfind("\\boxed")
+    idx = string.find("\\boxed")
     if idx < 0:
-        idx = string.rfind("\\fbox")
+        idx = string.find("\\fbox")
         if idx < 0:
             return None
 
@@ -726,41 +726,34 @@ with open("planning/"+cache_jsonl,'a') as outfile:
         print("-"*100)
         context = ""
 
-
-                
-
-
-'''
 def solution_generator():
-        messages=[
-            {"role": "user", "content": full_prompt},
-        ]
+    messages=[
+        {"role": "user", "content": full_prompt},
+    ]
 
-        # excute the module
-        success = False
-        patience = self.sg_patience
-        count = 0
-        while count < patience and not success:
-            if self.sg_temperature < 0.1 and count > 0:
-                _temperature = min(self.sg_temperature + 0.1, 1.0)
-            else:
-                _temperature = self.sg_temperature
-            
-            
-            solution = get_chat_response(messages=messages, temperature=_temperature, max_tokens=self.sg_max_tokens)
-            # print(f"Solution: {solution}"
-            
-            pattern = re.compile(r"[Tt]he answer is ([A-Z])")      # "The answer is XXXXX.",
-            res = pattern.findall(solution)
-            if len(res) > 0:
-                success = True
-            count += 1
+    # excute the module
+    success = False
+    patience = self.sg_patience
+    count = 0
+    while count < patience and not success:
+        if self.sg_temperature < 0.1 and count > 0:
+            _temperature = min(self.sg_temperature + 0.1, 1.0)
+        else:
+            _temperature = self.sg_temperature
+        
+        
+        solution = get_chat_response(messages=messages, temperature=_temperature, max_tokens=self.sg_max_tokens)
+        # print(f"Solution: {solution}"
+        
+        pattern = re.compile(r"[Tt]he answer is ([A-Z])")      # "The answer is XXXXX.",
+        res = pattern.findall(solution)
+        if len(res) > 0:
+            success = True
+        count += 1
 
-        # update the cache
-        self.cache["response"] =  self.cache["response"] + "\n Solution:\n" + solution
-        self.cache["solution"] = solution
-        self.cache["solution_generator:input"] = test_prompt
-        self.cache["solution_generator:output"] = solution
-        return test_prompt, solution
-    
-'''
+    # update the cache
+    self.cache["response"] =  self.cache["response"] + "\n Solution:\n" + solution
+    self.cache["solution"] = solution
+    self.cache["solution_generator:input"] = test_prompt
+    self.cache["solution_generator:output"] = solution
+    return test_prompt, solution

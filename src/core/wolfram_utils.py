@@ -33,6 +33,9 @@ SHORT_ANSWER_FAILURE_MARKERS = (
     "did not understand your input",
     "no short answer available",
     "error ",
+    "assumption",
+    "computation timed out",
+    "standard computation time exceeded",
 )
 
 PREFERRED_POD_TITLES = (
@@ -42,13 +45,20 @@ PREFERRED_POD_TITLES = (
     "solutions",
     "solution",
     "real solutions",
+    "real solution",
     "values",
     "value",
+    "answer",
+    "simplification",
+    "simplified form",
+    "numerical result",
 )
 
 DEPRIORITIZED_POD_TITLES = (
     "input interpretation",
     "input",
+    "notes",
+    "definition",
 )
 
 _UNIT_AFTER_NUMBER_RE = re.compile(
@@ -170,37 +180,77 @@ def _build_query_candidates(query: Optional[str]) -> List[str]:
     return candidates
 
 
-def _query_wolfram_v2(session: requests.Session, app_id: str, query: str, timeout: int) -> Dict[str, Any]:
+def _query_wolfram_v2(
+    session: requests.Session,
+    app_id: str,
+    query: str,
+    timeout: int,
+    retry_count: int = 0,
+    max_retries: int = 2,
+) -> Dict[str, Any]:
+    """Query Wolfram Alpha v2 API with improved error handling."""
     if xmltodict is None or Document is None:
         raise RuntimeError("Wolfram Alpha parsing dependencies are not installed")
-    response = session.get(
-        WOLFRAM_QUERY_URL,
-        params={"appid": app_id, "input": query},
-        timeout=timeout,
-    )
-    response.raise_for_status()
-    doc = xmltodict.parse(response.text, postprocessor=Document.make)
-    return doc["queryresult"]
+    
+    try:
+        response = session.get(
+            WOLFRAM_QUERY_URL,
+            params={"appid": app_id, "input": query},
+            timeout=timeout,
+        )
+        response.raise_for_status()
+        doc = xmltodict.parse(response.text, postprocessor=Document.make)
+        return doc["queryresult"]
+    except requests.HTTPError as exc:
+        status = exc.response.status_code if exc.response is not None else None
+        # Retry on server errors (5xx) or rate limit errors (429)
+        if status and (status == 429 or 500 <= status < 600) and retry_count < max_retries:
+            raise exc  # Let caller handle retry
+        # Don't retry on client errors (4xx except 429)
+        raise exc
+    except requests.Timeout:
+        if retry_count < max_retries:
+            raise
+        raise RuntimeError(f"Wolfram Alpha query timed out after {max_retries} retries")
+    except Exception as exc:
+        raise RuntimeError(f"Failed to parse Wolfram Alpha response: {exc}")
 
 
 def _query_wolfram_short_answer(
-    session: requests.Session, app_id: str, query: str, timeout: int
+    session: requests.Session,
+    app_id: str,
+    query: str,
+    timeout: int,
+    retry_count: int = 0,
+    max_retries: int = 2,
 ) -> Optional[str]:
-    response = session.get(
-        WOLFRAM_RESULT_URL,
-        params={"appid": app_id, "i": query},
-        timeout=timeout,
-    )
-    response.raise_for_status()
-    answer = response.text.strip()
-    if not answer:
-        return None
+    """Query Wolfram Alpha short answer API with improved error handling."""
+    try:
+        response = session.get(
+            WOLFRAM_RESULT_URL,
+            params={"appid": app_id, "i": query},
+            timeout=timeout,
+        )
+        response.raise_for_status()
+        answer = response.text.strip()
+        if not answer:
+            return None
 
-    lowered = answer.lower()
-    if any(marker in lowered for marker in SHORT_ANSWER_FAILURE_MARKERS):
-        return None
+        lowered = answer.lower()
+        if any(marker in lowered for marker in SHORT_ANSWER_FAILURE_MARKERS):
+            return None
 
-    return answer
+        return answer
+    except requests.HTTPError as exc:
+        status = exc.response.status_code if exc.response is not None else None
+        # Retry on server errors (5xx) or rate limit errors (429)
+        if status and (status == 429 or 500 <= status < 600) and retry_count < max_retries:
+            raise exc  # Let caller handle retry
+        raise exc
+    except requests.Timeout:
+        if retry_count < max_retries:
+            raise
+        raise RuntimeError(f"Wolfram Alpha short answer query timed out after {max_retries} retries")
 
 
 def _build_short_answer_result(query: str, answer: str) -> Dict[str, Any]:
@@ -218,6 +268,7 @@ def _build_short_answer_result(query: str, answer: str) -> Dict[str, Any]:
 
 
 def extract_wolfram_plaintext_answer(result: Any) -> Optional[str]:
+    """Extract plaintext answer from Wolfram Alpha result with enhanced parsing."""
     if not isinstance(result, dict):
         return None
 
@@ -247,6 +298,14 @@ def extract_wolfram_plaintext_answer(result: Any) -> Optional[str]:
             answer = str(plaintext).strip()
             if not answer:
                 continue
+            
+            # Filter out empty responses or error messages
+            if len(answer) < 2 or answer.lower() in ("none", "n/a", "undefined"):
+                continue
+            
+            # Skip if plaintext contains only whitespace or special characters
+            if not any(c.isalnum() for c in answer):
+                continue
 
             if any(token in title for token in DEPRIORITIZED_POD_TITLES):
                 fallback_candidates.append(answer)
@@ -275,7 +334,22 @@ def query_wolfram_alpha(
     logger: Optional[logging.Logger] = None,
     timeout: int = 20,
     max_attempts: int = 3,
+    initial_delay: float = 0.5,
 ) -> Dict[str, Any]:
+    """
+    Query Wolfram Alpha with improved retry logic and rate limiting.
+    
+    Args:
+        app_id: Wolfram Alpha API key
+        query: Query string
+        logger: Optional logger instance
+        timeout: Request timeout in seconds
+        max_attempts: Maximum number of attempts per candidate query
+        initial_delay: Initial delay in seconds for exponential backoff
+    
+    Returns:
+        Dictionary with query, result, answer, source, and error fields
+    """
     log = logger or logging.getLogger(__name__)
     candidates = _build_query_candidates(query)
 
@@ -300,6 +374,11 @@ def query_wolfram_alpha(
     session = requests.Session()
     session.trust_env = not _should_bypass_env_proxies()
     last_error: Optional[str] = None
+    
+    # Configure session with retry strategy
+    session.headers.update({
+        "User-Agent": "MathSensei/1.0",
+    })
 
     try:
         for candidate in candidates:
@@ -315,27 +394,88 @@ def query_wolfram_alpha(
                     }
                 except requests.HTTPError as exc:
                     status = exc.response.status_code if exc.response is not None else None
-                    last_error = f"HTTP {status}: {exc}"
-                    if status and 500 <= status < 600 and attempt < max_attempts:
+                    
+                    if status == 429:  # Rate limit
+                        # Extract retry-after header if available
+                        retry_after = exc.response.headers.get("Retry-After")
+                        delay = float(retry_after) if retry_after else min(initial_delay * (2 ** (attempt - 1)), 30)
+                        last_error = f"Rate limited (HTTP 429): {exc}"
+                        if attempt < max_attempts:
+                            log.warning(
+                                "Wolfram Alpha rate limited. Retrying after %s seconds (attempt %s/%s)",
+                                delay,
+                                attempt,
+                                max_attempts,
+                            )
+                            time.sleep(delay)
+                            continue
+                        break
+                    
+                    elif status and 500 <= status < 600:  # Server error
+                        delay = min(initial_delay * (2 ** (attempt - 1)), 10)
+                        last_error = f"HTTP {status}: {exc}"
+                        if attempt < max_attempts:
+                            log.warning(
+                                "Wolfram Alpha v2 server error (HTTP %s). Retrying in %s seconds (attempt %s/%s)",
+                                status,
+                                delay,
+                                attempt,
+                                max_attempts,
+                            )
+                            time.sleep(delay)
+                            continue
+                        break
+                    
+                    else:  # Client error (4xx except 429)
+                        last_error = f"HTTP {status}: {exc}"
+                        log.error("Wolfram Alpha v2 client error (HTTP %s) for query: %s", status, candidate[:200])
+                        break
+                
+                except requests.Timeout as exc:
+                    last_error = f"Timeout: {exc}"
+                    if attempt < max_attempts:
+                        delay = min(initial_delay * 2, 5)
                         log.warning(
-                            "Wolfram Alpha v2 attempt %s/%s failed with HTTP %s for query: %s",
+                            "Wolfram Alpha v2 timeout. Retrying in %s seconds (attempt %s/%s)",
+                            delay,
                             attempt,
                             max_attempts,
-                            status,
-                            candidate[:200],
                         )
-                        time.sleep(min(1.0 * attempt, 3.0))
+                        time.sleep(delay)
                         continue
                     break
+                
                 except requests.RequestException as exc:
                     last_error = str(exc)
                     if attempt < max_attempts:
-                        time.sleep(min(1.0 * attempt, 3.0))
+                        delay = min(initial_delay * (2 ** (attempt - 1)), 5)
+                        log.warning(
+                            "Wolfram Alpha v2 request error. Retrying in %s seconds (attempt %s/%s)",
+                            delay,
+                            attempt,
+                            max_attempts,
+                        )
+                        time.sleep(delay)
                         continue
                     break
 
+            # Fallback to short answer API
             try:
                 answer = _query_wolfram_short_answer(session, app_id, candidate, timeout)
+            except requests.HTTPError as exc:
+                status = exc.response.status_code if exc.response is not None else None
+                if status == 429:
+                    retry_after = exc.response.headers.get("Retry-After")
+                    delay = float(retry_after) if retry_after else 2
+                    log.warning("Wolfram Alpha short answer API rate limited. Waiting %s seconds.", delay)
+                    time.sleep(delay)
+                    try:
+                        answer = _query_wolfram_short_answer(session, app_id, candidate, timeout)
+                    except Exception:
+                        answer = None
+                else:
+                    last_error = f"Short answer API failed: HTTP {status}"
+                    answer = None
             except requests.RequestException as exc:
                 last_error = str(exc)
                 answer = None

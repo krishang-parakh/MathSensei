@@ -269,9 +269,9 @@ def last_boxed_only(sample):
     return (q, a)
 
 def last_boxed_only_string(string):
-    idx = string.rfind("\\boxed")
+    idx = string.find("\\boxed")
     if idx < 0:
-        idx = string.rfind("\\fbox")
+        idx = string.find("\\fbox")
         if idx < 0:
             return None
 
@@ -535,15 +535,15 @@ class solver:
 
     def _query_generation_settings(self):
         return {
-            "temperature": self._configured_temperature("qg_temperature", 0.0),
-            "max_tokens": self._configured_max_tokens("qg_max_tokens", 1000),
+            "temperature": self._configured_temperature("qg_temperature", 0.5),
+            "max_tokens": self._configured_max_tokens("qg_max_tokens", 3000),
             "patience": self._configured_patience("qg_patience", 10),
         }
 
     def _knowledge_extraction_settings(self):
         return {
             "temperature": self._configured_temperature("kr_temperature", 0.5),
-            "max_tokens": self._configured_max_tokens("kr_max_tokens", 1000),
+            "max_tokens": self._configured_max_tokens("kr_max_tokens", 2000),
         }
 
     def _call_text_backend(self, backend_name, prompt, *, temperature, max_tokens, patience=1):
@@ -653,18 +653,18 @@ class solver:
             + "Code:\n"
         )
 
-    def _build_last_resort_python_program(self):
-        fallback_answer = "0"
-        options = self._current_options() or []
-        if options:
-            first_option_key = options[0].get("key")
-            if first_option_key not in (None, ""):
-                fallback_answer = repr(str(first_option_key))
-        return (
-            "from sympy import *\n"
-            "# Last-resort fallback so the Python lane still emits a parseable answer.\n"
-            f"print({fallback_answer})"
-        )
+    # def _build_last_resort_python_program(self):
+    #     fallback_answer = "0"
+    #     options = self._current_options() or []
+    #     if options:
+    #         first_option_key = options[0].get("key")
+    #         if first_option_key not in (None, ""):
+    #             fallback_answer = repr(str(first_option_key))
+    #     return (
+    #         "from sympy import *\n"
+    #         "# Last-resort fallback so the Python lane still emits a parseable answer.\n"
+    #         f"print({fallback_answer})"
+    #     )
 
     def _generate_python_program_with_trace(self, full_prompt):
         attempts = []

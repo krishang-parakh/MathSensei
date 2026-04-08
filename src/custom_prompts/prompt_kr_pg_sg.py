@@ -1,5 +1,5 @@
 prompt = """
-Given the question and all the context, generate the final solution to the given mathematical problem. You should give concise solutions only using the context. Conclude the answer enclosed in the boxed format.
+Given the question and all the context, generate the final solution to the given mathematical problem. You should give concise solutions only using the context. Double-check all calculations and ensure the final answer is consistent with the python output provided. If the problem has multiple choice options, verify that the calculated answer matches one of the provided options. Conclude the answer enclosed in the boxed format.
 
 
 Question: A piece of yarn is $60$ cm long. The yarn is cut so that one piece is five times the length of the other piece. How many centimeters long is the shorter piece?

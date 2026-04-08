@@ -12,7 +12,7 @@ def _last_group_match(text, patterns):
     for pattern in patterns:
         matches = list(re.finditer(pattern, text, re.IGNORECASE | re.MULTILINE))
         if matches:
-            candidate = matches[-1].group(1).strip().strip(".")
+            candidate = matches[0].group(1).strip().strip(".")
             if candidate:
                 return candidate
     return None
