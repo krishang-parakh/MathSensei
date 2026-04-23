@@ -221,10 +221,29 @@ def _candidate_texts_for_resolution(text_values: Iterable[Optional[str]]) -> Lis
         if not cleaned:
             continue
         add(extract_final_answer_option_letter(cleaned))
-        add(extract_option_letter(cleaned))
-        for candidate in extract_answer_candidates(cleaned):
-            add(candidate)
-        add(cleaned)
+        # Avoid extracting a bare option letter from an option listing like
+        # "A) ... B) ...", which is not an "answer".
+        # Also avoid extracting option letters from long/multi-line tool outputs that merely
+        # mention options ("Option A: ...", "Option B: ...") since that tends to bias toward A.
+        if "\n" not in cleaned and len(cleaned) <= 200 and not _looks_like_option_listing(cleaned):
+            add(extract_option_letter(cleaned))
+        if "\n" in cleaned:
+            lines = [line.strip() for line in cleaned.splitlines() if line.strip()]
+            has_listing = any(_looks_like_option_listing(line) for line in lines)
+            for line in lines:
+                if _looks_like_option_listing(line):
+                    continue
+                for candidate in extract_answer_candidates(line):
+                    add(candidate)
+                add(line)
+            # If the blob contains an option listing, don't add the whole blob as a candidate;
+            # it's almost guaranteed to contain "Option A:" etc and will bias resolution.
+            if not has_listing:
+                add(cleaned)
+        else:
+            for candidate in extract_answer_candidates(cleaned):
+                add(candidate)
+            add(cleaned)
 
     return candidates
 
@@ -305,9 +324,13 @@ def select_option_from_values(
         return None
 
     candidates = _candidate_texts_for_resolution(text_values)
-    
+     
     # STEP 1: Try exact matching on all candidates (most reliable method)
     for candidate in candidates:
+        # Tool outputs sometimes include the full option list (e.g. "A) ... B) ..."),
+        # which should never be treated as an "answer candidate".
+        if _looks_like_option_listing(candidate):
+            continue
         matched = _exact_option_match(candidate, entries)
         if matched:
             return matched

@@ -1268,6 +1268,9 @@ def _needs_review_reason(record):
     if not record.get("final_answer"):
         return "No clear final answer was extracted."
     if record.get("evaluation_status") == "evaluated" and record.get("is_correct") is False:
+        mismatch_error = clean_display_text(record.get("evaluation_error"))
+        if mismatch_error:
+            return mismatch_error
         return "The final answer did not match the expected answer."
     return "One or more tool outputs disagreed or were incomplete."
 
@@ -1339,6 +1342,13 @@ def _method_source_for_answer(record, target_answer, fallback_label):
 
 
 def _incorrect_evaluation_reason(record):
+    mismatch_error = clean_display_text(record.get("evaluation_error"))
+    if mismatch_error:
+        final_answer = record.get("predicted_answer") or record.get("final_answer")
+        final_source, _ = _method_source_for_answer(record, final_answer, "Final Answer")
+        if final_source != "Final Answer":
+            return f"{final_source}: {mismatch_error}"
+        return mismatch_error
     final_answer = record.get("predicted_answer") or record.get("final_answer")
     gold_answer = record.get("gold_answer")
     final_source, _ = _method_source_for_answer(record, final_answer, "Final Answer")
@@ -1631,14 +1641,15 @@ def _render_preformatted_html(text, strip_comments=False):
     return escape(str(cleaned))
 
 
-def _render_plain_text_html(text, wrap_math=False, preserve_breaks=True):
+def _render_plain_text_html(text, wrap_math=False, preserve_breaks=True, auto_wrap_math=True):
     if text is None:
         return ""
 
     display_text = _strip_display_markdown(text)
     if not _looks_like_structured_literal_text(display_text):
         display_text = _convert_inline_math_delimiters(display_text)
-        display_text = _auto_wrap_math_lines(display_text)
+        if auto_wrap_math:
+            display_text = _auto_wrap_math_lines(display_text)
     already_wrapped = any(token in str(display_text) for token in ("\\(", "\\)", "\\[", "\\]", "$$"))
     rendered = escape(str(display_text))
     if wrap_math and not already_wrapped and _looks_like_math(display_text):
@@ -1665,6 +1676,71 @@ def _render_text_html(text, wrap_math=False, preserve_breaks=True):
             rendered_parts.append(render_asy_block_html(value))
         else:
             chunk = _render_plain_text_html(value, wrap_math=wrap_math, preserve_breaks=preserve_breaks)
+            if chunk:
+                rendered_parts.append(chunk)
+    return "".join(rendered_parts)
+
+
+def _format_question_display_text(text):
+    cleaned = _strip_display_markdown(clean_display_text(text) or "")
+    if not cleaned:
+        return ""
+    collapsed = re.sub(r"[ \t]+", " ", cleaned).strip()
+
+    key_match = re.search(r"(?i)\btranslation key:\s*", collapsed)
+    if not key_match:
+        return collapsed
+
+    header = collapsed[: key_match.end()].strip()
+    tail = collapsed[key_match.end() :].strip()
+    if not tail:
+        return header
+
+    proposition_match = re.search(r"[\(\[\{]\s*[∃∀]", tail)
+    definitions_text = tail
+    proposition_text = ""
+    if proposition_match:
+        definitions_text = tail[: proposition_match.start()].strip(" ,;")
+        proposition_text = tail[proposition_match.start() :].strip()
+
+    definition_lines = []
+    definition_matches = list(re.finditer(r"\b[A-Za-z][A-Za-z0-9]{0,5}\s*:\s*", definitions_text))
+    if len(definition_matches) >= 2:
+        for idx, match in enumerate(definition_matches):
+            start = match.start()
+            end = definition_matches[idx + 1].start() if idx + 1 < len(definition_matches) else len(definitions_text)
+            chunk = definitions_text[start:end].strip(" ,;")
+            if chunk:
+                definition_lines.append(chunk)
+    elif definitions_text:
+        definition_lines.append(definitions_text)
+
+    lines = [header]
+    lines.extend(definition_lines)
+    if proposition_text:
+        lines.append(proposition_text)
+    return "\n".join(line for line in lines if line)
+
+
+def _render_question_text_html(text, preserve_breaks=True):
+    if text is None:
+        return ""
+
+    if _looks_like_structured_literal_text(text):
+        return _render_plain_text_html(text, preserve_breaks=preserve_breaks, auto_wrap_math=False)
+
+    parts = split_asy_blocks(text)
+    if len(parts) == 1 and parts[0][0] == "text":
+        formatted = _format_question_display_text(text)
+        return _render_plain_text_html(formatted, preserve_breaks=preserve_breaks, auto_wrap_math=False)
+
+    rendered_parts = []
+    for part_type, value in parts:
+        if part_type == "asy":
+            rendered_parts.append(render_asy_block_html(value))
+        else:
+            formatted = _format_question_display_text(value)
+            chunk = _render_plain_text_html(formatted, preserve_breaks=preserve_breaks, auto_wrap_math=False)
             if chunk:
                 rendered_parts.append(chunk)
     return "".join(rendered_parts)
@@ -2002,7 +2078,7 @@ def _evaluation_explanation(record):
         if flagged_methods:
             return (
                 "The final answer matches the gold answer. "
-                + "Flagged method checks: "
+                + "\nFlagged method checks: "
                 + ", ".join(flagged_methods)
                 + "."
             )
@@ -2190,7 +2266,7 @@ def _record_card(record, context):
     <article class="problem-card" data-status="{record['status']}" data-dataset="{escape(str(record.get('dataset') or 'Unknown'))}" data-type="{escape(record['problem_type'])}" data-level="{escape(record['level'])}"{method_status_attrs}>
       <section class="question-shell">
         <div class="problem-card__eyebrow">Problem {_display_problem_number(record.get('pid'))}</div>
-        <div class="problem-card__title">{_render_text_html(record['problem'], preserve_breaks=True)}</div>
+        <div class="problem-card__title">{_render_question_text_html(record['problem'], preserve_breaks=True)}</div>
       </section>
       {option_board}
       <div class="reveal-stack">

@@ -1,0 +1,11 @@
+{
+  "timestamp": "2026-04-23T09:33:02",
+  "label": "smoke_par5_b10_40",
+  "model": "pg_walpha_sg",
+  "dataset": "MMLU",
+  "split": "test",
+  "evaluated": 0,
+  "correct": 0,
+  "accuracy": null,
+  "total_records": 40
+}

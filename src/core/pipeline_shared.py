@@ -24,23 +24,78 @@ def build_wolfram_answer_cleaner_prompt(query: str, result) -> str:
 
 def parse_wolfram_query_response(text: Optional[str]):
     cleaned = str(text or "").strip()
-    if not cleaned or "Final Query:" not in cleaned:
+    if not cleaned:
         return None
 
-    final_idx = cleaned.find("Final Query:")
-    answer_idx = cleaned.find("Answer:")
-    thought_block = cleaned[:answer_idx] if answer_idx != -1 else cleaned[:final_idx]
-    query_block = cleaned[final_idx + len("Final Query:"):]
-    first_line = query_block.split("\n")[0].strip()
-    if "##" in first_line:
-        first_line = first_line[:first_line.index("##")].strip()
-    query = remove_wrapping_backticks(first_line)
+    # Some backends return structured payloads.
+    for loader in (json.loads, ast.literal_eval):
+        try:
+            parsed = loader(cleaned)
+        except Exception:
+            parsed = None
+        if isinstance(parsed, dict):
+            query = (
+                parsed.get("query")
+                or parsed.get("final_query")
+                or parsed.get("wolfram_query")
+                or parsed.get("wolfram_alpha_query")
+            )
+            query = remove_wrapping_backticks(str(query or "").strip()) or None
+            if query:
+                thought = str(parsed.get("thought") or "").strip()
+                return {"thought": thought, "query": query}
+
+    def match_labeled_query(label: str):
+        match = re.search(rf"(?im)^\s*{re.escape(label)}\s*:?\s*(.+?)\s*$", cleaned)
+        if not match:
+            return None
+        candidate = match.group(1).strip()
+        if "##" in candidate:
+            candidate = candidate[:candidate.index("##")].strip()
+        return remove_wrapping_backticks(candidate) if candidate else None
+
+    query = None
+    for label in ("Final Query", "Final Query:", "Next Query", "Next Query:", "Wolfram Query", "Query"):
+        query = match_labeled_query(label.replace(":", ""))
+        if query:
+            break
+
+    thought = ""
+    if query and "Thought" in cleaned:
+        thought_match = re.search(r"(?ims)^\s*Thought\s*:\s*(.*?)(?=^\s*(?:Answer|Final Query|Next Query|Query)\s*:|\Z)", cleaned)
+        if thought_match:
+            thought = thought_match.group(1).strip()
+
+    if not query and "Final Query" in cleaned:
+        final_idx = cleaned.lower().find("final query")
+        answer_idx = cleaned.lower().find("answer:")
+        thought_block = cleaned[:answer_idx] if answer_idx != -1 else cleaned[:final_idx]
+        query_block = cleaned[final_idx:]
+        line = query_block.split("\n", 1)[-1].strip() if "\n" in query_block else query_block.strip()
+        query = remove_wrapping_backticks(line.strip(": ").strip()) if line else None
+
+    if not query:
+        # Last-resort: pick the last non-empty line that looks like an expression/query.
+        lines = [line.strip() for line in cleaned.splitlines() if line.strip()]
+        for line in reversed(lines):
+            lowered = line.lower()
+            if lowered.startswith(("thought:", "answer:", "final answer:", "status:", "observation:", "solution:")):
+                continue
+            candidate = remove_wrapping_backticks(line)
+            if not candidate:
+                continue
+            if re.search(r"[=+\-*/^(){}[\]]", candidate) or re.search(r"\b(simplify|factor|expand|solve|coefficient|coeff|integrate|derivative|limit)\b", candidate, re.IGNORECASE):
+                query = candidate
+                break
+            if re.fullmatch(r"\d+(?:\.\d+)?", candidate):
+                query = candidate
+                break
+
     if not query:
         return None
 
-    thought = re.sub(r"^\s*Thought\s*:\s*", "", thought_block.strip(), flags=re.IGNORECASE)
     return {
-        "thought": thought or "",
+        "thought": re.sub(r"^\s*Thought\s*:\s*", "", (thought or "").strip(), flags=re.IGNORECASE),
         "query": query,
     }
 

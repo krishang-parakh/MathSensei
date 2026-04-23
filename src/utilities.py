@@ -144,7 +144,7 @@ MODEL_NAME = (
     or _clean_env_value(_get_env("MODEL_NAME"))
     or AZURE_DEPLOYMENT_NAME
     or _clean_env_value(_get_env("DEFAULT_ENGINE"))
-    or "gpt-5-nano"
+    or "model-router"
 )
 
 if STANDARD_OPENAI_API_KEY and AZURE_ENDPOINT and AZURE_DEPLOYMENT_NAME:
@@ -592,6 +592,43 @@ def _get_attr_or_key(obj, name, default=None):
     return getattr(obj, name, default)
 
 
+def _is_invalid_prompt_error(exc: Exception) -> bool:
+    message = str(exc or "").lower()
+    return (
+        "invalid_prompt" in message
+        or "flagged as potentially violating" in message
+        or "potentially violating our usage policy" in message
+    )
+
+
+def _slim_prompt_text_for_invalid_prompt(text: str, *, max_chars: int = 6000) -> str:
+    raw = str(text or "")
+    lowered = raw.lower()
+    idx = lowered.rfind("question:")
+    trimmed = raw[idx:] if idx != -1 else raw
+    trimmed = trimmed.strip()
+    if len(trimmed) > max_chars:
+        trimmed = trimmed[-max_chars:]
+    return trimmed
+
+
+def _slim_messages_for_invalid_prompt(messages):
+    slimmed = []
+    for message in messages or []:
+        role = _get_attr_or_key(message, "role", "user") or "user"
+        content = _get_attr_or_key(message, "content", "")
+        if role == "user":
+            slimmed.append(
+                {
+                    "role": role,
+                    "content": _slim_prompt_text_for_invalid_prompt(_content_to_text(content)),
+                }
+            )
+        else:
+            slimmed.append({"role": role, "content": content})
+    return slimmed
+
+
 def _messages_to_responses_input(messages):
     response_input = []
     for message in messages:
@@ -640,26 +677,170 @@ def _apply_stop_sequences(text: str, stop) -> str:
     return text.strip()
 
 
-def _chat_completion_standard_openai(messages, temperature=0.0, max_tokens=5000, stop=None):
+def _standard_openai_reasoning_kwargs(model_name: str):
+    normalized = str(model_name or "").strip().lower()
+    if normalized.startswith("gpt-5") or normalized.startswith("o"):
+        configured_effort = str(os.getenv("OPENAI_REASONING_EFFORT", "low") or "low").strip().lower()
+        supported_efforts = {"none", "low", "medium", "high", "xhigh"}
+        effort = configured_effort if configured_effort in supported_efforts else "low"
+        return {"reasoning": {"effort": effort}}
+    return {}
+
+
+def _extract_supported_reasoning_efforts(error_text: str):
+    message = str(error_text or "")
+    match = re.search(r"Supported values are:\s*(.+?)\.", message, flags=re.IGNORECASE)
+    if not match:
+        return []
+    values = re.findall(r"'([^']+)'", match.group(1))
+    return [value.strip().lower() for value in values if value and value.strip()]
+
+
+def _is_reasoning_effort_unsupported_error(error_text: str) -> bool:
+    lowered = str(error_text or "").lower()
+    return "reasoning.effort" in lowered and "unsupported value" in lowered
+
+
+def _build_reasoning_fallback_kwargs(call_kwargs, error_text):
+    supported_from_error = set(_extract_supported_reasoning_efforts(error_text))
+    configured = str(os.getenv("OPENAI_REASONING_EFFORT", "low") or "low").strip().lower()
+    preferred_order = [configured, "low", "medium", "none", "high", "xhigh"]
+    if supported_from_error:
+        preferred_order = [effort for effort in preferred_order if effort in supported_from_error]
+
+    current_effort = str((call_kwargs.get("reasoning") or {}).get("effort") or "").strip().lower()
+    fallbacks = []
+    seen = set()
+
+    for effort in preferred_order:
+        if not effort or effort == current_effort or effort in seen:
+            continue
+        candidate = dict(call_kwargs)
+        candidate["reasoning"] = {"effort": effort}
+        fallbacks.append(candidate)
+        seen.add(effort)
+
+    without_reasoning = dict(call_kwargs)
+    without_reasoning.pop("reasoning", None)
+    fallbacks.append(without_reasoning)
+    return fallbacks
+
+
+def _standard_openai_supports_temperature(model_name: str) -> bool:
+    normalized = str(model_name or "").strip().lower()
+    # Reasoning-first models commonly reject temperature in the Responses API.
+    if normalized.startswith("gpt-5") or normalized.startswith("o"):
+        return False
+    return True
+
+
+def _responses_retry_budget(max_tokens):
+    try:
+        requested = max(1, int(max_tokens))
+    except (TypeError, ValueError):
+        requested = 1
+    return min(max(requested * 2, 400), 12000)
+
+
+def _response_is_reasoning_only(response) -> bool:
+    output_items = _get_attr_or_key(response, "output", []) or []
+    types = [
+        str(_get_attr_or_key(item, "type", "")).strip().lower()
+        for item in output_items
+        if item is not None
+    ]
+    return bool(types) and all(item_type == "reasoning" for item_type in types)
+
+
+def _response_incomplete_reason(response):
+    incomplete_details = _get_attr_or_key(response, "incomplete_details", {}) or {}
+    return str(_get_attr_or_key(incomplete_details, "reason", "") or "").strip().lower() or None
+
+
+def _chat_completion_standard_openai(messages, temperature=0.0, max_tokens=5000, stop=None, model_name=None):
     client = _get_standard_openai_client()
+    selected_model = str(model_name or MODEL_NAME or "").strip() or MODEL_NAME
+    try:
+        requested_output_tokens = max(1, int(max_tokens))
+    except (TypeError, ValueError):
+        requested_output_tokens = 1
+
     kwargs = {
-        "model": MODEL_NAME,
+        "model": selected_model,
         "input": _messages_to_responses_input(messages),
-        "max_output_tokens": max_tokens,
+        "max_output_tokens": requested_output_tokens,
+    }
+    kwargs.update(_standard_openai_reasoning_kwargs(selected_model))
+    if temperature is not None and _standard_openai_supports_temperature(selected_model):
+        kwargs["temperature"] = temperature
+
+    def create_response(call_kwargs):
+        try:
+            return client.responses.create(**call_kwargs)
+        except Exception as exc:
+            if "temperature" in str(exc).lower() and "unsupported" in str(exc).lower():
+                fallback_kwargs = dict(call_kwargs)
+                fallback_kwargs.pop("temperature", None)
+                return client.responses.create(**fallback_kwargs)
+            if _is_reasoning_effort_unsupported_error(exc):
+                for fallback_kwargs in _build_reasoning_fallback_kwargs(call_kwargs, exc):
+                    try:
+                        return client.responses.create(**fallback_kwargs)
+                    except Exception as fallback_exc:
+                        if _is_reasoning_effort_unsupported_error(fallback_exc):
+                            continue
+                        raise
+            if "model_not_found" in str(exc).lower() or "does not exist" in str(exc).lower():
+                return client.responses.create(**call_kwargs)
+            raise
+
+    response = create_response(kwargs)
+    response_text = _apply_stop_sequences(_extract_responses_text(response), stop)
+    if response_text:
+        return response_text
+
+    retry_budget = _responses_retry_budget(requested_output_tokens)
+    if (
+        retry_budget > requested_output_tokens
+        and (
+            _response_is_reasoning_only(response)
+            or _response_incomplete_reason(response) == "max_output_tokens"
+        )
+    ):
+        retry_kwargs = dict(kwargs)
+        retry_kwargs["max_output_tokens"] = retry_budget
+        retry_response = create_response(retry_kwargs)
+        return _apply_stop_sequences(_extract_responses_text(retry_response), stop)
+
+    return response_text
+
+
+def _chat_completion_azure(messages, temperature=0.0, max_tokens=5000, stop=None, model_name=None):
+    client = _get_azure_client()
+    kwargs = {
+        "model": model_name or AZURE_DEPLOYMENT_NAME,
+        "messages": messages,
+        "max_completion_tokens": max_tokens,
     }
     if temperature is not None:
         kwargs["temperature"] = temperature
+    if stop is not None:
+        kwargs["stop"] = stop
 
     try:
-        response = client.responses.create(**kwargs)
+        response = client.chat.completions.create(**kwargs)
     except Exception as exc:
-        if "temperature" in str(exc).lower() and "unsupported" in str(exc).lower():
-            kwargs.pop("temperature", None)
-            response = client.responses.create(**kwargs)
+        exc_text = str(exc).lower()
+        if "temperature" in exc_text and ("unsupported" in exc_text or "does not support" in exc_text):
+            fallback_kwargs = dict(kwargs)
+            fallback_kwargs.pop("temperature", None)
+            try:
+                response = client.chat.completions.create(**fallback_kwargs)
+            except Exception as retry_exc:
+                raise RuntimeError("Azure chat completion failed after temperature fallback.") from retry_exc
         else:
-            raise
-
-    return _apply_stop_sequences(_extract_responses_text(response), stop)
+            raise RuntimeError("Azure chat completion failed without fallback.") from exc
+    return response.choices[0].message.content.strip()
 
 
 def get_textdavinci002_response(prompt, temperature, max_tokens, n=1, patience=1, sleep_time=0):
@@ -752,41 +933,32 @@ def get_gpt3_response(
     raise RuntimeError(f"GPT3 completion failed after retries: {last_error}")
 
 
-def _chat_completion(messages, temperature=0.0, max_tokens=5000, stop=None):
+def _chat_completion(messages, temperature=0.0, max_tokens=5000, stop=None, model_name=None):
     messages = _sanitize_messages_for_model_input(messages)
     
     # Determine which backend to use and get the appropriate client
     backend = _chat_backend_mode()
     if backend == "openai":
-        client = _get_standard_openai_client()
-        model_name = MODEL_NAME
-    elif backend == "azure":
-        client = _get_azure_client()
-        model_name = AZURE_DEPLOYMENT_NAME
-    else:
-        raise RuntimeError(
-            "Chat API is not configured. Set OPENAI_API_KEY (for standard OpenAI) or "
-            "OPENAI_API_BASE, OPENAI_API_KEY, OPENAI_API_VERSION, OPENAI_DEPLOYMENT_NAME "
-            "(for Azure) in src/.env"
+        return _chat_completion_standard_openai(
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            stop=stop,
+            model_name=model_name,
         )
-    
-    kwargs = {
-        "model": model_name,
-        "messages": messages,
-    }
-    
-    # Handle backend-specific parameters: Azure doesn't support temperature, only max_completion_tokens
     if backend == "azure":
-        kwargs["max_completion_tokens"] = max_tokens
-    else:
-        kwargs["temperature"] = temperature
-        kwargs["max_tokens"] = max_tokens
-    
-    if stop is not None:
-        kwargs["stop"] = stop
-
-    response = client.chat.completions.create(**kwargs)
-    return response.choices[0].message.content.strip()
+        return _chat_completion_azure(
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            stop=stop,
+            model_name=model_name,
+        )
+    raise RuntimeError(
+        "Chat API is not configured. Set OPENAI_API_KEY (for standard OpenAI) or "
+        "OPENAI_API_BASE, OPENAI_API_KEY, OPENAI_API_VERSION, OPENAI_DEPLOYMENT_NAME "
+        "(for Azure) in src/.env"
+    )
 
 
 def get_chat_response_code(
@@ -798,6 +970,7 @@ def get_chat_response_code(
     n=1,
     patience=10,
     sleep_time=0,
+    model_name=None,
 ):
     logging.info("----Response starts-----")
 
@@ -815,6 +988,7 @@ def get_chat_response_code(
                 temperature=temperature,
                 max_tokens=max_tokens,
                 stop=stop,
+                model_name=model_name,
             )
             logging.info("----Response ends-----")
             _sleep_if_needed(sleep_time)
@@ -922,11 +1096,12 @@ def get_gemini_response(full_prompt):
     )
 
 
-def get_chat_response(messages, temperature=0, max_tokens=5000, n=1, patience=1, sleep_time=0):
+def get_chat_response(messages, temperature=0, max_tokens=5000, n=1, patience=1, sleep_time=0, model_name=None):
     logging.info("CHATGPT CALLED")
     logging.info("----Response starts-----")
 
     last_error = None
+    tried_slim_prompt = False
     while patience > 0:
         patience -= 1
         try:
@@ -934,19 +1109,29 @@ def get_chat_response(messages, temperature=0, max_tokens=5000, n=1, patience=1,
                 messages=messages,
                 temperature=temperature,
                 max_tokens=max_tokens,
+                model_name=model_name,
             )
             logging.info("----Response ends-----")
             _sleep_if_needed(sleep_time)
             return response_text
         except Exception as e:
             last_error = e
-            logging.exception("Azure chat call failed: %s", e)
+            if not tried_slim_prompt and _is_invalid_prompt_error(e):
+                tried_slim_prompt = True
+                logging.warning(
+                    "Chat call was flagged as invalid_prompt; retrying once with a slimmed Question-only prompt."
+                )
+                messages = _slim_messages_for_invalid_prompt(messages)
+                patience += 1
+                continue
+            # Avoid flooding normal runs with full tracebacks for transient API errors.
+            logging.warning("Chat call failed: %s", e)
             _sleep_if_needed(sleep_time)
 
     diagnostic = _diagnose_openai_error(last_error)
     if diagnostic:
-        raise RuntimeError(f"Azure chat call failed after retries: {last_error}. {diagnostic}")
-    raise RuntimeError(f"Azure chat call failed after retries: {last_error}")
+        raise RuntimeError(f"Chat call failed after retries: {last_error}. {diagnostic}")
+    raise RuntimeError(f"Chat call failed after retries: {last_error}")
 
 
 def floatify_ans(ans):

@@ -1,5 +1,6 @@
 import os
 import sys
+import tempfile
 import unittest
 
 
@@ -72,9 +73,11 @@ class TestModelProgramPipeline(unittest.TestCase):
         instance.python_model = "gemini"
         instance.pg_temperature = 0
         instance.pg_max_tokens = 200
+        instance.pg_engine = "model-router"
+        instance.dataset = "GSM"
 
         model_module.get_gemini_response = lambda prompt: "I think the answer is 5."
-        model_module.get_chat_response = lambda messages, temperature, max_tokens: "from sympy import *\nprint(5)"
+        model_module.get_chat_response = lambda messages, temperature, max_tokens, **kwargs: "from sympy import *\nprint(5)"
 
         program = solver._generate_python_program(instance, "Question: What is 2 + 3?\nCode:\n")
 
@@ -112,12 +115,47 @@ class TestModelProgramPipeline(unittest.TestCase):
             instance.cache.get("module_warnings", []),
         )
 
-    # def test_last_resort_python_program_uses_first_option_letter_for_multiple_choice(self):
-    #     instance = solver.__new__(solver)
-    #     instance.cache = {"example": {"options": [{"key": "C", "label": "200 + 450 + 200"}]}}
-    #     instance.dataset = "AQUA"
+    def test_last_resort_python_program_raises_explicit_generation_failure(self):
+        instance = solver.__new__(solver)
+        instance.cache = {"example": {"options": [{"key": "C", "label": "200 + 450 + 200"}]}}
+        instance.dataset = "AQUA"
+        program = solver._build_last_resort_python_program(instance)
 
-    #     self.assertIn("print('C')", program)
+        self.assertIn("raise RuntimeError", program)
+        self.assertNotIn("print('C')", program)
+
+    def test_read_jsonl_file_decodes_cp1252_when_utf8_decode_fails(self):
+        with tempfile.NamedTemporaryFile(delete=False) as handle:
+            handle.write(b'{"problem": "O\x92Brien", "answer": "A"}\n')
+            temp_path = handle.name
+
+        try:
+            records = model_module.read_jsonl_file(temp_path)
+            self.assertEqual(records[0]["problem"], "O\u2019Brien")
+        finally:
+            os.remove(temp_path)
+
+    def test_wolfram_query_plausibility_accepts_logic_truth_table_queries(self):
+        instance = solver.__new__(solver)
+
+        self.assertTrue(
+            solver._wolfram_query_is_plausible(
+                instance,
+                "truth table for (G <=> H) and ~I, ~G or (~H or I), G",
+            )
+        )
+
+    def test_wolfram_fallback_query_builds_truth_table_query_from_question(self):
+        instance = solver.__new__(solver)
+        question = (
+            "Construct a complete truth table for the following argument. "
+            "(G <=> H) and ~I, ~G or (~H or I), G. Options: A) Valid B) Invalid"
+        )
+
+        fallback = solver._fallback_wolfram_query_from_question(instance, question)
+
+        self.assertIsNotNone(fallback)
+        self.assertIn("truth table", fallback.lower())
 
 
 if __name__ == "__main__":

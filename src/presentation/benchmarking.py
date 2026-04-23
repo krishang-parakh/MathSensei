@@ -683,6 +683,36 @@ def _math_candidates(record):
     return _candidate_texts(gold.get("value") or gold.get("display"))
 
 
+def _raw_answer_hint(value):
+    cleaned = clean_benchmark_text(value)
+    if not cleaned:
+        return None
+    lines = [line.strip() for line in str(cleaned).splitlines() if line.strip()]
+    return lines[-1] if lines else cleaned
+
+
+def _raw_predicted_answer(record):
+    return _raw_answer_hint(
+        record.get("final_answer")
+        or record.get("answer")
+        or record.get("final_generated_solution")
+        or record.get("solution")
+        or record.get("solution_generator_output")
+        or record.get("program_output")
+        or record.get("program_executor:output")
+        or record.get("wolfram_output")
+        or record.get("wolfram_alpha_search:output")
+    )
+
+
+def _raw_gold_answer(record):
+    return _raw_answer_hint(
+        record.get("gold_answer")
+        or record.get("ground_truth_solution")
+        or record.get("correct_option")
+    )
+
+
 def evaluate_record(record):
     dataset = dataset_label(record.get("dataset"))
     predicted = resolve_final_answer_bundle(record)
@@ -696,12 +726,20 @@ def evaluate_record(record):
         "gold_answer": gold_answer,
         "predicted_answer_display": predicted.get("display") or predicted_answer,
         "gold_answer_display": gold.get("display") or gold_answer,
+        "predicted_answer_raw": _raw_predicted_answer(record),
+        "gold_answer_raw": _raw_gold_answer(record),
         "predicted_answer_option": predicted.get("option_key"),
         "gold_answer_option": gold.get("option_key"),
         "evaluation_status": "not-evaluated",
         "is_correct": None,
         "evaluation_method": None,
+        "evaluation_error": None,
     }
+
+    def set_mismatch_error():
+        raw_pred = evaluation.get("predicted_answer_raw") or evaluation.get("predicted_answer_display") or evaluation.get("predicted_answer")
+        raw_gold = evaluation.get("gold_answer_raw") or evaluation.get("gold_answer_display") or evaluation.get("gold_answer")
+        evaluation["evaluation_error"] = f"Raw answer mismatch: predicted '{raw_pred}' vs gold '{raw_gold}'."
 
     if dataset in {"AQUA", "MMLU"}:
         predicted_values = _resolved_option_candidates([evaluation["predicted_answer_display"] or predicted_answer], options)
@@ -732,6 +770,7 @@ def evaluate_record(record):
                     return evaluation
         evaluation["evaluation_status"] = "evaluated"
         evaluation["is_correct"] = False
+        set_mismatch_error()
         return evaluation
 
     if dataset == "GSM":
@@ -755,6 +794,7 @@ def evaluate_record(record):
                     return evaluation
         evaluation["evaluation_status"] = "evaluated"
         evaluation["is_correct"] = False
+        set_mismatch_error()
         return evaluation
 
     if dataset == "MATH":
@@ -773,6 +813,7 @@ def evaluate_record(record):
         if evaluation["gold_answer"] and evaluation["predicted_answer"]:
             evaluation["evaluation_status"] = "evaluated"
             evaluation["is_correct"] = False
+            set_mismatch_error()
         return evaluation
 
     match = _generic_match_pair([predicted_answer], [gold_answer])
@@ -790,6 +831,7 @@ def evaluate_record(record):
     if evaluation["gold_answer"] and evaluation["predicted_answer"]:
         evaluation["evaluation_status"] = "evaluated"
         evaluation["is_correct"] = False
+        set_mismatch_error()
         return evaluation
     return evaluation
 

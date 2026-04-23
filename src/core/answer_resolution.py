@@ -1,10 +1,12 @@
 import re
+from decimal import Decimal, InvalidOperation
 
 from core.answer_parsing import (
     candidate_has_rejection_cue,
     candidate_looks_like_option_listing,
     clean_answer_text,
     extract_answer_candidates,
+    extract_numeric_answer,
     extract_final_answer_option_letter,
     extract_option_letter,
     extract_preferred_answer,
@@ -135,9 +137,26 @@ def _resolve_option_entry(priority_texts, fallback_texts, options, question_text
     allowed = _allowed_option_letters(options)
 
     explicit_entry = None
+    explicit_from_final_tag = False
     for text in _clean_texts(*priority_texts):
         explicit = extract_final_answer_option_letter(text, allowed=allowed)
+        if explicit:
+            explicit_from_final_tag = True
         cleaned_text = clean_answer_text(text)
+        if not explicit and cleaned_text:
+            # Multi-line solutions often contain a bare option reference on the last line
+            # ("The answer is E.") which we still want to detect as an explicit letter.
+            for candidate in extract_answer_candidates(cleaned_text):
+                if not candidate:
+                    continue
+                if not _is_bare_option_reference(candidate, options):
+                    continue
+                explicit = extract_option_letter(candidate, allowed=allowed)
+                if explicit:
+                    if "final answer" in candidate.lower() or candidate.lstrip().startswith("####"):
+                        explicit_from_final_tag = True
+                    break
+
         if not explicit and cleaned_text and len(cleaned_text) <= 80 and "\n" not in cleaned_text:
             explicit = extract_option_letter(cleaned_text, allowed=allowed)
         entry = option_entry_for_key(options, explicit)
@@ -154,14 +173,55 @@ def _resolve_option_entry(priority_texts, fallback_texts, options, question_text
     )
 
     if explicit_entry:
+        # If an explicit option letter is present, it can be wrong (e.g. "The answer is E")
+        # even when the surrounding text derives a value matching a different option.
+        # Prefer value-derived matches from the text (and/or tool outputs) over a conflicting
+        # bare option reference.
+        derived_candidates = []
+        explicit_prefix = re.compile(rf"(?im)^\s*(?:option\s+)?[{re.escape(allowed)}][\)\.\:]\s+")
+        for text in combined_texts:
+            for candidate in extract_answer_candidates(text):
+                if not candidate:
+                    continue
+                if candidate_has_rejection_cue(candidate):
+                    continue
+                if candidate_looks_like_option_listing(candidate, allowed=allowed):
+                    continue
+                if _is_bare_option_reference(candidate, options):
+                    continue
+                if explicit_prefix.match(candidate):
+                    # Skip "E. 5,000" style explicit option labels; we already captured those.
+                    continue
+                derived_candidates.append(candidate)
+
+        derived_match = select_option_from_values(
+            derived_candidates,
+            options,
+            question_text=question_text,
+            allow_nearest=True,
+        )
+
         fallback_match = select_option_from_values(
             _clean_texts(*fallback_texts),
             options,
             question_text=question_text,
             allow_nearest=True,
         )
-        if fallback_match and fallback_match.get("key") != explicit_entry.get("key"):
+        # If the solution text included a real "Final Answer: <letter>" tag, don't let tool outputs
+        # override it. Tool outputs often print per-option diagnostics (e.g. "A = 750", "B = 800")
+        # that can spuriously match an option even when the solver finalized a different one.
+        if (
+            not explicit_from_final_tag
+            and fallback_match
+            and fallback_match.get("key") != explicit_entry.get("key")
+        ):
             return fallback_match
+        if (
+            not explicit_from_final_tag
+            and derived_match
+            and derived_match.get("key") != explicit_entry.get("key")
+        ):
+            return derived_match
         return explicit_entry
 
     return matched
@@ -203,6 +263,39 @@ def resolve_final_answer_bundle(record):
             None,
         )
     )
+
+    # For non-option datasets, prefer tool-derived numerics when they strongly disagree with a
+    # "pure numeric" solution snippet. This prevents bad SG extractions like "Answer: 0"
+    # from overriding a correct Python/WA computation.
+    dataset = str(record.get("dataset") or "").upper()
+
+    def normalize_decimal(candidate):
+        numeric = extract_numeric_answer(candidate or "")
+        if not numeric:
+            return None
+        token = str(numeric).strip().replace(",", "")
+        try:
+            return Decimal(token)
+        except (InvalidOperation, ValueError):
+            return None
+
+    def looks_like_pure_number(text):
+        cleaned = clean_answer_text(text) or ""
+        cleaned = cleaned.replace("\\boxed{", "").replace("}", "").strip()
+        return bool(re.fullmatch(r"[-+]?\d[\d,]*(?:\.\d+)?", cleaned))
+
+    if dataset == "MATH" and not uses_option_answers(record) and looks_like_pure_number(value):
+        sol_dec = normalize_decimal(value)
+        py_dec = normalize_decimal(record.get("program_output") or record.get("program_executor:output"))
+        wa_dec = normalize_decimal(record.get("wolfram_output") or record.get("wolfram_alpha_search:output"))
+
+        if py_dec is not None and wa_dec is not None and py_dec == wa_dec and sol_dec is not None and sol_dec != py_dec:
+            return _answer_bundle(value=str(py_dec))
+        if py_dec is not None and sol_dec is not None and sol_dec != py_dec and (wa_dec is None or wa_dec == py_dec):
+            return _answer_bundle(value=str(py_dec))
+        if wa_dec is not None and sol_dec is not None and sol_dec != wa_dec and py_dec is None:
+            return _answer_bundle(value=str(wa_dec))
+
     return _answer_bundle(value=value)
 
 

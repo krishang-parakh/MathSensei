@@ -1,0 +1,1 @@
+{"timestamp": "2026-04-23T11:44:06", "label": "smoke_nocoerce_par5_10", "model": "pg_walpha_sg", "dataset": "MMLU", "split": "test", "evaluated": 10, "correct": 9, "accuracy": 0.9, "total_records": 10}

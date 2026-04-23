@@ -63,7 +63,22 @@ def _compact(value, width=72):
 
 
 def _print_kv(label, value):
-    print(f"{label:<14}: {value}")
+    try:
+        print(f"{label:<14}: {value}")
+    except UnicodeEncodeError:
+        # Windows consoles can still default to legacy codepages (e.g. cp1252).
+        # Fall back to an ASCII-safe representation so runs don't crash on symbols like \u2220.
+        safe = f"{label:<14}: {value}"
+        safe = safe.encode("ascii", "backslashreplace").decode("ascii")
+        print(safe)
+
+
+def _safe_print(value=""):
+    try:
+        print(value)
+    except UnicodeEncodeError:
+        safe = str(value).encode("ascii", "backslashreplace").decode("ascii")
+        print(safe)
 
 
 def _dataset_label(value):
@@ -94,10 +109,10 @@ def module_status(output):
 
 
 def print_run_header(args, result_file, test_number, data_note=None):
-    print()
-    print(_line("="))
-    print("MathSensei Run")
-    print(_line("="))
+    _safe_print()
+    _safe_print(_line("="))
+    _safe_print("MathSensei Run")
+    _safe_print(_line("="))
     _print_kv("Dataset", _dataset_label(args.dataset))
     _print_kv("Model", args.model)
     _print_kv("Label", args.label)
@@ -106,34 +121,34 @@ def print_run_header(args, result_file, test_number, data_note=None):
     _print_kv("Output", result_file)
     if data_note:
         _print_kv("Data Note", data_note)
-    print(_line("-"))
+    _safe_print(_line("-"))
 
 
 def print_problem_header(pid, total, preview):
-    print()
-    print(_line("-"))
-    print(f"Problem {pid + 1}/{total}")
-    print(_line("-"))
+    _safe_print()
+    _safe_print(_line("-"))
+    _safe_print(f"Problem {pid + 1}/{total}")
+    _safe_print(_line("-"))
     wrapped = textwrap.fill(_compact(preview, width=220), width=LINE_WIDTH)
-    print(wrapped)
+    _safe_print(wrapped)
 
 
 def print_module_plan(modules):
-    print(f"Modules       : {' -> '.join(modules)}")
+    _safe_print(f"Modules       : {' -> '.join(modules)}")
 
 
 def print_module_result(module_name, module_input, module_output):
-    print()
-    print(f"[{module_name}]")
+    _safe_print()
+    _safe_print(f"[{module_name}]")
     _print_kv("Status", module_status(module_output))
     _print_kv("Input", _compact(module_input))
     _print_kv("Output", _compact(module_output))
 
 
 def print_problem_summary(cache):
-    print()
-    print("Problem Summary")
-    print(_line("-"))
+    _safe_print()
+    _safe_print("Problem Summary")
+    _safe_print(_line("-"))
     _print_kv("Dataset", _dataset_label(cache.get("dataset")))
     _print_kv("Final Answer", _compact(cache.get("answer")))
     _print_kv("WA Query", _compact(cache.get("wolfram_alpha_search:input")))
@@ -143,10 +158,10 @@ def print_problem_summary(cache):
 
 
 def print_run_summary(total, succeeded, failed, result_root, report_path=None, benchmark=None):
-    print()
-    print(_line("="))
-    print("Run Summary")
-    print(_line("="))
+    _safe_print()
+    _safe_print(_line("="))
+    _safe_print("Run Summary")
+    _safe_print(_line("="))
     _print_kv("Total", total)
     _print_kv("Succeeded", succeeded)
     _print_kv("Failed", failed)
@@ -159,8 +174,8 @@ def print_run_summary(total, succeeded, failed, result_root, report_path=None, b
     _print_kv("Outputs", os.path.normpath(result_root))
     if report_path:
         _print_kv("Report", os.path.normpath(report_path))
-    print(_line("="))
+    _safe_print(_line("="))
 
 
 def print_warning(message):
-    print(f"[WARN] {message}")
+    _safe_print(f"[WARN] {message}")

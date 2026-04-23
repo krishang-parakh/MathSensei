@@ -378,7 +378,24 @@ def extract_answer_candidates(text, max_lines=5):
     add(extract_boxed_answer(cleaned))
 
     lines = [line.strip() for line in cleaned.splitlines() if line.strip()]
-    tail_lines = list(reversed(lines[-max_lines:])) if lines else [cleaned]
+
+    # Most natural-language solutions place the answer at the end, but tool outputs (Python/WA)
+    # often print intermediate diagnostics after the true result. Prefer answer-looking lines
+    # within the tail window first so we don't accidentally capture a trailing debug number.
+    window = lines[-max_lines:] if lines else [cleaned]
+    answerish = []
+    answerish_seen = set()
+    answerish_re = re.compile(
+        r"\b(final answer|answer|result|output|coefficient|probability|solution)\b",
+        flags=re.IGNORECASE,
+    )
+    for line in window:
+        if line and answerish_re.search(line) and line not in answerish_seen:
+            answerish.append(line)
+            answerish_seen.add(line)
+
+    # Keep the historical bias towards the last few lines, but only after the answer-ish lines.
+    tail_lines = answerish + [line for line in reversed(window) if line not in answerish_seen]
 
     for line in tail_lines:
         add(extract_tagged_answer(line))

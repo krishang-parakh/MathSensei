@@ -51,13 +51,16 @@ if "openai" not in sys.modules:
 from utilities import (
     _chat_completion,
     _chat_completion_azure,
+    _build_reasoning_fallback_kwargs,
     _candidate_gemini_model_names,
     _diagnose_openai_error,
+    _extract_supported_reasoning_efforts,
     _http_status_code_from_error,
     _looks_like_broken_loopback_proxy,
     _sanitize_messages_for_model_input,
     _sanitize_text_for_model_input,
     _split_gemini_model_names,
+    _standard_openai_reasoning_kwargs,
     safe_execute,
 )
 from core import env_loader
@@ -171,7 +174,7 @@ class TestUtilities(unittest.TestCase):
 
         with mock.patch("utilities._chat_backend_mode", return_value="openai"), mock.patch(
             "utilities._get_standard_openai_client", return_value=fake_client
-        ), mock.patch("utilities.MODEL_NAME", "gpt-5-nano"):
+        ), mock.patch("utilities.MODEL_NAME", "model-router"):
             output = _chat_completion(
                 messages=[{"role": "system", "content": "Reply briefly."}, {"role": "user", "content": "Say OK"}],
                 temperature=0.3,
@@ -182,21 +185,50 @@ class TestUtilities(unittest.TestCase):
         self.assertEqual(output, "OK")
         response_api.create.assert_called_once()
         create_kwargs = response_api.create.call_args.kwargs
-        self.assertEqual(create_kwargs["model"], "gpt-5-nano")
-        self.assertEqual(create_kwargs["max_output_tokens"], 12)
+        self.assertEqual(create_kwargs["model"], "model-router")
+        self.assertEqual(create_kwargs["max_output_tokens"], 2000)
         self.assertEqual(create_kwargs["input"][0]["role"], "system")
+
+    def test_standard_openai_reasoning_defaults_to_low_for_gpt5_family(self):
+        with mock.patch.dict(os.environ, {}, clear=False):
+            kwargs = _standard_openai_reasoning_kwargs("gpt-5.4-nano")
+
+        self.assertEqual(kwargs, {"reasoning": {"effort": "low"}})
+
+    def test_extract_supported_reasoning_efforts_parses_error_payload(self):
+        values = _extract_supported_reasoning_efforts(
+            "Unsupported value: 'minimal'. Supported values are: 'none', 'low', 'medium', 'high', and 'xhigh'."
+        )
+
+        self.assertEqual(values, ["none", "low", "medium", "high", "xhigh"])
+
+    def test_build_reasoning_fallback_kwargs_removes_unsupported_effort(self):
+        base = {
+            "model": "gpt-5.4-nano",
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
+            "max_output_tokens": 100,
+            "reasoning": {"effort": "minimal"},
+        }
+        fallback_kwargs = _build_reasoning_fallback_kwargs(
+            base,
+            "Supported values are: 'none', 'low', 'medium', 'high', and 'xhigh'.",
+        )
+
+        efforts = [kwargs.get("reasoning", {}).get("effort") for kwargs in fallback_kwargs if kwargs.get("reasoning")]
+        self.assertIn("low", efforts)
+        self.assertNotIn("minimal", efforts)
 
     def test_chat_completion_falls_back_when_requested_model_does_not_exist(self):
         response_api = mock.Mock()
         response_api.create.side_effect = [
-            RuntimeError("Error code: 400 - {'error': {'message': \"The requested model 'gpt-5-nano' does not exist.\", 'code': 'model_not_found'}}"),
+            RuntimeError("Error code: 400 - {'error': {'message': \"The requested model 'model-router' does not exist.\", 'code': 'model_not_found'}}"),
             types.SimpleNamespace(output_text="Recovered"),
         ]
         fake_client = types.SimpleNamespace(responses=response_api)
 
         with mock.patch("utilities._chat_backend_mode", return_value="openai"), mock.patch(
             "utilities._get_standard_openai_client", return_value=fake_client
-        ), mock.patch("utilities.MODEL_NAME", "gpt-5-nano"):
+        ), mock.patch("utilities.MODEL_NAME", "model-router"):
             output = _chat_completion(
                 messages=[{"role": "user", "content": "Say hi"}],
                 temperature=0.3,
@@ -204,8 +236,8 @@ class TestUtilities(unittest.TestCase):
             )
 
         self.assertEqual(output, "Recovered")
-        self.assertEqual(response_api.create.call_args_list[0].kwargs["model"], "gpt-5-nano")
-        self.assertEqual(response_api.create.call_args_list[1].kwargs["model"], "gpt-5-nano")
+        self.assertEqual(response_api.create.call_args_list[0].kwargs["model"], "model-router")
+        self.assertEqual(response_api.create.call_args_list[1].kwargs["model"], "model-router")
 
     def test_chat_completion_azure_prefers_max_completion_tokens(self):
         create_api = mock.Mock()
@@ -226,7 +258,7 @@ class TestUtilities(unittest.TestCase):
         self.assertEqual(output, "Azure OK")
         create_kwargs = create_api.create.call_args.kwargs
         self.assertEqual(create_kwargs["model"], "pandu")
-        self.assertEqual(create_kwargs["max_completion_tokens"], 16)
+        self.assertEqual(create_kwargs["max_completion_tokens"], 2000)
         self.assertNotIn("max_tokens", create_kwargs)
 
     def test_chat_completion_azure_retries_without_temperature_when_model_rejects_it(self):
@@ -255,7 +287,7 @@ class TestUtilities(unittest.TestCase):
         second_kwargs = create_api.create.call_args_list[1].kwargs
         self.assertIn("temperature", first_kwargs)
         self.assertNotIn("temperature", second_kwargs)
-        self.assertEqual(second_kwargs["max_completion_tokens"], 16)
+        self.assertEqual(second_kwargs["max_completion_tokens"], 2000)
 
     def test_env_loader_fallback_parses_dotenv_without_python_dotenv(self):
         with tempfile.NamedTemporaryFile("w", delete=False, encoding="utf-8") as handle:

@@ -258,6 +258,14 @@ def sanitize_generated_python(program):
         stripped = line.strip()
         lowered = stripped.lower()
 
+        # Drop common "enumerated heading" prose from repair models (e.g. "1) Fix ...", "2. Fix ...").
+        # These lines are not valid Python and can sneak past other heuristics due to parentheses/punctuation.
+        if stripped and not stripped.startswith("#"):
+            if re.match(r"^\s*\d+\)\s+\S", raw_line):
+                continue
+            if re.match(r"^\s*\d+\.\s+\S", raw_line):
+                continue
+
         if stripped.startswith("Corrected Python Code:"):
             stripped = stripped.split(":", 1)[1].strip()
             line = stripped
@@ -438,7 +446,27 @@ def _repair_missing_print_output(program, error_message):
     return "\n".join(repaired_lines).strip(), f"Appended print({chosen_name}) so the derived final answer is emitted."
 
 
+def _repair_sympy_coeff_function(program, error_message):
+    lowered_error = str(error_message or "").lower()
+    if "name 'coeff' is not defined" not in lowered_error:
+        return None, None
+
+    text = str(program or "")
+    # Rewrite coeff(expr, sym, n) -> expr.coeff(sym, n)
+    pattern = re.compile(r"(?<!\.)\bcoeff\s*\(\s*([^,]+?)\s*,\s*([^,]+?)\s*,\s*([^)]+?)\s*\)")
+    if not pattern.search(text):
+        return None, None
+
+    # Expand first so coeff works on products/sums reliably.
+    repaired = pattern.sub(r"expand(\1).coeff(\2, \3)", text)
+    return repaired.strip(), "Rewrote SymPy coeff(expr, sym, n) calls to expand(expr).coeff(sym, n)."
+
+
 def apply_local_python_repair(program, error_message):
+    repaired_program, note = _repair_sympy_coeff_function(program, error_message)
+    if repaired_program:
+        return repaired_program, note
+
     repaired_program, note = _repair_sympy_solve_output_shape(program, error_message)
     if repaired_program:
         return repaired_program, note

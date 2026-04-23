@@ -1,0 +1,11 @@
+{
+  "timestamp": "2026-04-23T11:27:35",
+  "label": "smoke_fix_par5_30",
+  "model": "pg_walpha_sg",
+  "dataset": "MMLU",
+  "split": "test",
+  "evaluated": 30,
+  "correct": 29,
+  "accuracy": 0.9666666666666667,
+  "total_records": 30
+}

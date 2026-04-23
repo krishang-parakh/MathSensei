@@ -2,6 +2,7 @@ import os
 import sys
 import unittest
 from types import SimpleNamespace
+from unittest import mock
 
 
 TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -9,6 +10,7 @@ SRC_DIR = os.path.dirname(TESTS_DIR)
 if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 
+import core.app_support as app_support
 from core.app_support import apply_global_model_overrides, solution_prompt_family
 
 
@@ -63,6 +65,20 @@ class TestAppSupport(unittest.TestCase):
         self.assertEqual(solution_prompt_family("sg"), "kr_walpha_sg")
         self.assertEqual(solution_prompt_family("pg_sg"), "kr_walpha_sg")
         self.assertEqual(solution_prompt_family("planner"), "kr_walpha_sg")
+
+    def test_print_problem_header_falls_back_when_console_cannot_encode_unicode(self):
+        printed = []
+
+        def fake_print(value=""):
+            text = str(value)
+            if any(ord(ch) > 127 for ch in text):
+                raise UnicodeEncodeError("charmap", text, 0, 1, "cannot encode")
+            printed.append(text)
+
+        with mock.patch("builtins.print", side_effect=fake_print):
+            app_support.print_problem_header(0, 1, "Angle \u2200")
+
+        self.assertTrue(any("\\u2200" in line for line in printed))
 
 
 if __name__ == "__main__":
