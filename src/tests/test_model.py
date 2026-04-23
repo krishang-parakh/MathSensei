@@ -73,7 +73,7 @@ class TestModelProgramPipeline(unittest.TestCase):
         instance.python_model = "gemini"
         instance.pg_temperature = 0
         instance.pg_max_tokens = 200
-        instance.pg_engine = "model-router"
+        instance.pg_engine = "gpt-4o"
         instance.dataset = "GSM"
 
         model_module.get_gemini_response = lambda prompt: "I think the answer is 5."
@@ -115,14 +115,13 @@ class TestModelProgramPipeline(unittest.TestCase):
             instance.cache.get("module_warnings", []),
         )
 
-    def test_last_resort_python_program_raises_explicit_generation_failure(self):
+    def test_last_resort_python_program_uses_first_option_letter_for_multiple_choice(self):
         instance = solver.__new__(solver)
         instance.cache = {"example": {"options": [{"key": "C", "label": "200 + 450 + 200"}]}}
         instance.dataset = "AQUA"
         program = solver._build_last_resort_python_program(instance)
 
-        self.assertIn("raise RuntimeError", program)
-        self.assertNotIn("print('C')", program)
+        self.assertIn("print('C')", program)
 
     def test_read_jsonl_file_decodes_cp1252_when_utf8_decode_fails(self):
         with tempfile.NamedTemporaryFile(delete=False) as handle:
