@@ -640,6 +640,11 @@ def _apply_stop_sequences(text: str, stop) -> str:
     return text.strip()
 
 
+def _responses_api_supports_temperature(model_name: str) -> bool:
+    normalized = str(model_name or "").strip().lower()
+    return not (normalized.startswith("gpt-5") or normalized.startswith("o"))
+
+
 def _chat_completion_standard_openai(messages, temperature=0.0, max_tokens=5000, stop=None):
     client = _get_standard_openai_client()
     kwargs = {
@@ -647,7 +652,7 @@ def _chat_completion_standard_openai(messages, temperature=0.0, max_tokens=5000,
         "input": _messages_to_responses_input(messages),
         "max_output_tokens": max_tokens,
     }
-    if temperature is not None:
+    if temperature is not None and _responses_api_supports_temperature(MODEL_NAME):
         kwargs["temperature"] = temperature
 
     try:
@@ -754,38 +759,52 @@ def get_gpt3_response(
 
 def _chat_completion(messages, temperature=0.0, max_tokens=5000, stop=None):
     messages = _sanitize_messages_for_model_input(messages)
-    
-    # Determine which backend to use and get the appropriate client
+
+    # Determine which backend to use.
     backend = _chat_backend_mode()
     if backend == "openai":
-        client = _get_standard_openai_client()
-        model_name = MODEL_NAME
-    elif backend == "azure":
-        client = _get_azure_client()
-        model_name = AZURE_DEPLOYMENT_NAME
-    else:
+        # Route standard OpenAI calls through Responses API to stay compatible
+        # with modern GPT-5/o-series token parameters.
+        return _chat_completion_standard_openai(
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            stop=stop,
+        )
+    if backend != "azure":
         raise RuntimeError(
             "Chat API is not configured. Set OPENAI_API_KEY (for standard OpenAI) or "
             "OPENAI_API_BASE, OPENAI_API_KEY, OPENAI_API_VERSION, OPENAI_DEPLOYMENT_NAME "
             "(for Azure) in src/.env"
         )
-    
+
+    client = _get_azure_client()
     kwargs = {
-        "model": model_name,
+        "model": AZURE_DEPLOYMENT_NAME,
         "messages": messages,
+        "max_completion_tokens": max_tokens,
     }
-    
-    # Handle backend-specific parameters: Azure doesn't support temperature, only max_completion_tokens
-    if backend == "azure":
-        kwargs["max_completion_tokens"] = max_tokens
-    else:
-        kwargs["temperature"] = temperature
-        kwargs["max_tokens"] = max_tokens
-    
+
     if stop is not None:
         kwargs["stop"] = stop
 
-    response = client.chat.completions.create(**kwargs)
+    try:
+        response = client.chat.completions.create(**kwargs)
+    except Exception as exc:
+        lowered = str(exc).lower()
+        # Older Azure API versions may still require max_tokens instead.
+        if "max_completion_tokens" in lowered and (
+            "unknown parameter" in lowered
+            or "unsupported parameter" in lowered
+            or "unrecognized request argument" in lowered
+        ):
+            legacy_kwargs = dict(kwargs)
+            legacy_kwargs.pop("max_completion_tokens", None)
+            legacy_kwargs["max_tokens"] = max_tokens
+            response = client.chat.completions.create(**legacy_kwargs)
+        else:
+            raise
+
     return response.choices[0].message.content.strip()
 
 
