@@ -6,7 +6,6 @@ import random
 import time
 import copy
 import hashlib
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # add the parent directory to the path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))) 
@@ -175,18 +174,17 @@ def resolve_run_modules(args, solver_instance):
         return ["solution_generator"]
 
 
-def execute_modules(solver_instance, module_names, debug=False, emit_logs=True):
+def execute_modules(solver_instance, module_names, debug=False):
     module_names = normalize_module_sequence(module_names)
     executed_solution_generator = False
     for index, module_name in enumerate(module_names):
         module_input, module_output, error, elapsed_seconds, backend_label = call_solver_module(solver_instance, module_name)
         if module_name == "solution_generator" and error is None:
             executed_solution_generator = True
-        if emit_logs:
-            print_module_result(module_name, module_input, module_output)
-        if error and emit_logs:
+        print_module_result(module_name, module_input, module_output)
+        if error:
             print_warning(error)
-        if debug and emit_logs:
+        if debug:
             print(f"======== [Module]: solver.{module_name} ========\n")
             print(f"# [Input]\n{module_input}\n")
             print(f"# [Output]\n{module_output}\n")
@@ -220,15 +218,6 @@ def prepare_example_for_dataset(example, dataset):
         )
 
     return example
-
-
-def build_problem_preview(example):
-    return (
-        example.get("problem")
-        or example.get("question")
-        or example.get("Question")
-        or str(example)
-    )
 
 
 def build_question_signature(example, dataset, pid=None):
@@ -272,87 +261,6 @@ def initialize_question_state(solver_instance, pid, example, requested_dataset):
         solver_instance.cache["response"] = initial_response
 
     return current_dataset
-
-
-def clone_solver_for_problem(base_solver):
-    cloned_solver = copy.copy(base_solver)
-    cloned_solver.cache = {}
-    cloned_solver.modules = []
-    cloned_solver.dependency_install_attempts = set()
-    return cloned_solver
-
-
-def enrich_cache_with_final_answer(cache_row):
-    normalized_record = normalize_record(cache_row)
-    cache_row["answer"] = normalized_record.get("final_answer")
-    cache_row["final_answer"] = normalized_record.get("final_answer")
-    cache_row["final_answer_value"] = normalized_record.get("final_answer_value")
-    cache_row["final_answer_option"] = normalized_record.get("final_answer_option")
-    return normalized_record
-
-
-def persist_problem_outputs(cache_row, normalized_record, cache_file, cache_jsonl, readable_jsonl):
-    with open(cache_file, "a", encoding="utf-8") as f:
-        try:
-            f.write(json.dumps(cache_row, indent=2, separators=(',', ': '), ensure_ascii=False) + "\n")
-        except Exception as e:
-            print_warning(str(e))
-
-    with open(cache_jsonl, "a", encoding="utf-8") as f:
-        try:
-            json.dump(cache_row, f, ensure_ascii=False)
-            f.write('\n')
-        except Exception as e:
-            print_warning(str(e))
-
-    with open(readable_jsonl, "a", encoding="utf-8") as f:
-        try:
-            json.dump(normalized_record, f, ensure_ascii=False)
-            f.write("\n")
-        except Exception as e:
-            print_warning(str(e))
-
-
-def run_problem_once(base_solver, args, pid, example, *, debug=False, emit_logs=True):
-    problem_solver = clone_solver_for_problem(base_solver)
-    initialize_question_state(problem_solver, pid, example, args.dataset)
-
-    modules = resolve_run_modules(args, problem_solver)
-    module_names = list(modules)
-    problem_solver.modules = list(module_names)
-    problem_solver.cache["modules"] = list(module_names)
-    problem_solver.cache["run_model"] = args.model
-    if emit_logs:
-        print_module_plan(module_names)
-
-    question_started_at = time.perf_counter()
-    try:
-        execute_modules(problem_solver, module_names, debug=debug, emit_logs=emit_logs)
-    except Exception as exc:
-        message = f"Problem {pid} failed: {exc}"
-        problem_solver.cache.setdefault("module_errors", []).append(message)
-        if emit_logs:
-            print_warning(message)
-    finally:
-        problem_solver.cache["question_elapsed_seconds"] = round(time.perf_counter() - question_started_at, 4)
-
-    normalized_record = enrich_cache_with_final_answer(problem_solver.cache)
-    return {
-        "pid": pid,
-        "cache": problem_solver.cache,
-        "normalized_record": normalized_record,
-        "module_names": module_names,
-    }
-
-
-def iter_problem_batches(problem_ids, batch_size):
-    ids = list(problem_ids)
-    if not ids:
-        return
-    if batch_size is None or batch_size <= 0:
-        batch_size = len(ids)
-    for start in range(0, len(ids), batch_size):
-        yield ids[start:start + batch_size]
 
 
 def prepare_error_mode_state(solver_instance, cached_row, rerun_modules, requested_dataset):
@@ -440,28 +348,28 @@ def parse_args():
     
     # module prediction
     parser.add_argument('--modules', nargs='+', default=None, help='default modules')
-    parser.add_argument('--policy_engine', type=str, default=os.getenv('POLICY_ENGINE') or os.getenv('DEFAULT_ENGINE') or "auto-matic", help='engine for module prediction')
+    parser.add_argument('--policy_engine', type=str, default=os.getenv('POLICY_ENGINE') or os.getenv('DEFAULT_ENGINE') or "gpt-4o", help='engine for module prediction')
     parser.add_argument('--policy_temperature', type=float, default=0, help='temperature for module prediction')
     parser.add_argument('--policy_max_tokens', type=int, default=1000, help='max tokens for module prediction')
     
     # program generation
-    parser.add_argument('--pg_engine', type=str, default=os.getenv('PG_ENGINE') or os.getenv('DEFAULT_ENGINE') or "auto-matic", help='engine for program generation')
+    parser.add_argument('--pg_engine', type=str, default=os.getenv('PG_ENGINE') or os.getenv('DEFAULT_ENGINE') or "gpt-4o", help='engine for program generation')
     parser.add_argument('--pg_temperature', type=float, default=0.5, help='temperature for program generation')
     parser.add_argument('--pg_max_tokens', type=int, default=1500, help='max tokens for program generation')
     
     # knowledge retrieval
-    parser.add_argument('--kr_engine', type=str, default=os.getenv('KR_ENGINE') or os.getenv('DEFAULT_ENGINE') or "auto-matic", help='engine for knowledge retrieval')
+    parser.add_argument('--kr_engine', type=str, default=os.getenv('KR_ENGINE') or os.getenv('DEFAULT_ENGINE') or "gpt-4o", help='engine for knowledge retrieval')
     parser.add_argument('--kr_temperature', type=float, default=0.5, help='temperature for knowledge retrieval')
     parser.add_argument('--kr_max_tokens', type=int, default=1000, help='max tokens for knowledge retrieval')
    
     # query generator
-    parser.add_argument('--qg_engine', type=str, default=os.getenv('QG_ENGINE') or os.getenv('DEFAULT_ENGINE') or "auto-matic", help='engine for query generator')
+    parser.add_argument('--qg_engine', type=str, default=os.getenv('QG_ENGINE') or os.getenv('DEFAULT_ENGINE') or "gpt-4o", help='engine for query generator')
     parser.add_argument('--qg_temperature', type=float, default=0., help='temperature for query generator')
     parser.add_argument('--qg_max_tokens', type=int, default=1000, help='max tokens for query generator')
     parser.add_argument('--qg_patience', type=int, default=5, help='patience for query generator')
 
     # solution_generator
-    parser.add_argument('--sg_engine', type=str, default=os.getenv('SG_ENGINE') or os.getenv('DEFAULT_ENGINE') or "auto-matic", help='engine for solution generator')
+    parser.add_argument('--sg_engine', type=str, default=os.getenv('SG_ENGINE') or os.getenv('DEFAULT_ENGINE') or "gpt-4o", help='engine for solution generator')
     parser.add_argument('--sg_temperature', type=float, default=0.5, help='temperature for solution generator')
     parser.add_argument('--sg_max_tokens', type=int, default=3000, help='max tokens for solution generator')
     parser.add_argument('--sg_patience', type=int, default=2, help='patience for solution generator')
@@ -471,28 +379,12 @@ def parse_args():
     parser.add_argument('--refine',type=str,default='no',help="Whether to include the refinement of code using error message")
     parser.add_argument('--error_mode',type=str,default='no',help="Finishing the examples which had error (None or '') output in 1st run")
     parser.add_argument('--bing_count', type=int, default=5, help='no of results returned for bing')
-    parser.add_argument(
-        '--parallel_workers',
-        type=int,
-        default=1,
-        help='Number of problems to solve concurrently in normal mode. 1 keeps sequential execution.',
-    )
-    parser.add_argument(
-        '--parallel_batch_size',
-        type=int,
-        default=0,
-        help='Problems submitted per batch when parallel mode is enabled. 0 means use parallel_workers.',
-    )
 
     
 
     # debug
     parser.add_argument('--debug', action='store_true')
     args = parser.parse_args()
-    if args.parallel_workers < 1:
-        parser.error("--parallel_workers must be at least 1")
-    if args.parallel_batch_size < 0:
-        parser.error("--parallel_batch_size cannot be negative")
     args.model = normalize_model_name(args.model)
     args = apply_global_model_overrides(args)
     if args.task_name is None:
@@ -673,104 +565,81 @@ if __name__ == "__main__":
     complete_count = 0
     needs_review_count = 0
     run_records = []
-    problem_ids = list(range(solver.current_index, solver.test_number))
-    parallel_workers = min(args.parallel_workers, len(problem_ids)) if problem_ids else 1
 
-    if parallel_workers > 1:
-        batch_size = args.parallel_batch_size or parallel_workers
-        print_warning(
-            f"Parallel mode enabled: {parallel_workers} workers; batch size={batch_size}. "
-            "Problem-level results remain isolated and are written in pid order."
-        )
+    for pid in range(solver.current_index, solver.test_number):
+
+ 
         if args.debug:
-            print_warning("Parallel mode suppresses per-module debug output to avoid interleaved logs.")
+            print("\n\n===================================\n")
+            print(f"# [Pid]: {pid}\n") # problem id
+        
+        solver.current_index+= 1                         # number of current results
+        current_dataset = initialize_question_state(
+            solver,
+            pid,
+            solver.examples[pid],
+            args.dataset,
+        )
+        
+        problem_preview = (
+            solver.cache["example"].get("problem")
+            or solver.cache["example"].get("question")
+            or solver.cache["example"].get("Question")
+            or str(solver.cache["example"])
+        )
+        print_problem_header(pid, solver.test_number, problem_preview)
+        
+        modules = resolve_run_modules(args, solver)
+        
+        module_names = list(modules)
+        print_module_plan(module_names)
+        solver.modules = list(module_names)
+        solver.cache["modules"] = list(module_names)
+        solver.cache["run_model"] = args.model
+            
+        # [2] Execute the modules 
+        if args.debug:
+            print(f"# [Modules]\n{module_names}\n")
+        question_started_at = time.perf_counter()
+        execute_modules(solver, module_names, debug=args.debug)
+        solver.cache["question_elapsed_seconds"] = round(time.perf_counter() - question_started_at, 4)
 
-        for batch_ids in iter_problem_batches(problem_ids, batch_size):
-            batch_results = {}
-            max_workers = min(parallel_workers, len(batch_ids))
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                future_by_pid = {}
-                for pid in batch_ids:
-                    problem_preview = build_problem_preview(solver.examples[pid])
-                    print_problem_header(pid, solver.test_number, problem_preview)
-                    future = executor.submit(
-                        run_problem_once,
-                        solver,
-                        args,
-                        pid,
-                        solver.examples[pid],
-                        debug=False,
-                        emit_logs=False,
-                    )
-                    future_by_pid[future] = pid
+        # Resolve a canonical final answer for printing + caching.
+        # This uses the same normalization/evaluation logic that powers the HTML report.
+        normalized_record = normalize_record(solver.cache)
+        solver.cache["answer"] = normalized_record.get("final_answer")
+        solver.cache["final_answer"] = normalized_record.get("final_answer")
+        solver.cache["final_answer_value"] = normalized_record.get("final_answer_value")
+        solver.cache["final_answer_option"] = normalized_record.get("final_answer_option")
 
-                for future in as_completed(future_by_pid):
-                    pid = future_by_pid[future]
-                    try:
-                        batch_results[pid] = future.result()
-                    except Exception as exc:
-                        fallback_cache = {
-                            "pid": pid,
-                            "dataset": args.dataset,
-                            "modules": [],
-                            "run_model": args.model,
-                            "module_errors": [f"Parallel worker crashed: {exc}"],
-                        }
-                        normalized_record = enrich_cache_with_final_answer(fallback_cache)
-                        batch_results[pid] = {
-                            "pid": pid,
-                            "cache": fallback_cache,
-                            "normalized_record": normalized_record,
-                            "module_names": [],
-                        }
-                        print_warning(f"Problem {pid} crashed in parallel worker: {exc}")
+        with open(cache_file, "a", encoding="utf-8") as f:
+            try:
+                f.write(json.dumps(solver.cache, indent=2, separators=(',', ': '), ensure_ascii=False) + "\n")
+            except Exception as e:
+                print(e)
+                print(solver.cache)
 
-            for pid in batch_ids:
-                result = batch_results.get(pid)
-                if result is None:
-                    continue
-                solver.current_index = max(solver.current_index, pid + 1)
-                cache_row = result["cache"]
-                normalized_record = result["normalized_record"]
-                persist_problem_outputs(cache_row, normalized_record, cache_file, cache_jsonl, readable_jsonl)
-                run_records.append(normalized_record)
+        with open(cache_jsonl, "a", encoding="utf-8") as f:
+            try:
+                json.dump(solver.cache, f, ensure_ascii=False)
+                f.write('\n')
+            except Exception as e:
+                print_warning(str(e))
 
-                if normalized_record["status"] == "complete":
-                    complete_count += 1
-                else:
-                    needs_review_count += 1
+        run_records.append(normalized_record)
+        with open(readable_jsonl, "a", encoding="utf-8") as f:
+            try:
+                json.dump(normalized_record, f, ensure_ascii=False)
+                f.write("\n")
+            except Exception as e:
+                print_warning(str(e))
 
-                print_module_plan(result.get("module_names") or [])
-                print_problem_summary(cache_row)
-    else:
-        for pid in problem_ids:
-            if args.debug:
-                print("\n\n===================================\n")
-                print(f"# [Pid]: {pid}\n")
+        if normalized_record["status"] == "complete":
+            complete_count += 1
+        else:
+            needs_review_count += 1
 
-            problem_preview = build_problem_preview(solver.examples[pid])
-            print_problem_header(pid, solver.test_number, problem_preview)
-            solver.current_index += 1
-            result = run_problem_once(
-                solver,
-                args,
-                pid,
-                solver.examples[pid],
-                debug=args.debug,
-                emit_logs=True,
-            )
-            cache_row = result["cache"]
-            normalized_record = result["normalized_record"]
-
-            persist_problem_outputs(cache_row, normalized_record, cache_file, cache_jsonl, readable_jsonl)
-            run_records.append(normalized_record)
-
-            if normalized_record["status"] == "complete":
-                complete_count += 1
-            else:
-                needs_review_count += 1
-
-            print_problem_summary(cache_row)
+        print_problem_summary(solver.cache)
 
     benchmark_row = build_run_benchmark_row(args, run_records)
     with open(run_benchmark_file, "w", encoding="utf-8") as handle:
