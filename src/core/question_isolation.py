@@ -296,19 +296,6 @@ def looks_like_cross_problem_leak(question_text, candidate_text, *, mode="progra
     candidate_numbers = details["candidate_numbers"]
 
     if mode == "program":
-        # Heuristic: some models sometimes emit "batch" code that solves multiple unrelated
-        # problems in one response (often labeled "# 1)", "# 2)", etc.). Treat that as a leak
-        # even if some numbers/tokens overlap with the current question.
-        program_text = str(candidate_text or "")
-        enumerated_sections = len(re.findall(r"(?m)^\s*#\s*\d+\s*[\)\.\:\-]", program_text))
-        if enumerated_sections >= 2:
-            return True
-
-        # Another common batch format: "# Problem 1", "# Question 1", "# Problem 2", ...
-        labeled_sections = len(re.findall(r"(?im)^\s*#\s*(?:problem|question)\s*\d+\b", program_text))
-        if labeled_sections >= 2:
-            return True
-
         if len(question_numbers) >= 2 and len(candidate_numbers) >= 2 and not overlap_numbers and len(foreign_numbers) >= 2:
             return True
         if len(foreign_tokens) >= 4 and len(overlap_tokens) <= 1:

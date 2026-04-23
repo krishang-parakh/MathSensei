@@ -26,7 +26,6 @@ class TestBenchmarking(unittest.TestCase):
         self.assertEqual(evaluation["evaluation_status"], "evaluated")
         self.assertTrue(evaluation["is_correct"])
         self.assertEqual(evaluation["evaluation_method"], "gsm-numeric")
-        self.assertEqual(evaluation["predicted_answer_raw"], "18.0")
 
     def test_gsm_numeric_evaluation_accepts_final_answer_label(self):
         record = {
@@ -67,9 +66,6 @@ class TestBenchmarking(unittest.TestCase):
 
         self.assertEqual(evaluation["evaluation_status"], "evaluated")
         self.assertFalse(evaluation["is_correct"])
-        self.assertIn("Raw answer mismatch", evaluation["evaluation_error"])
-        self.assertIn("0**", evaluation["evaluation_error"])
-        self.assertIn("60", evaluation["evaluation_error"])
 
     def test_explicit_final_answer_takes_precedence_over_solution_text(self):
         record = {

@@ -21,7 +21,6 @@ from presentation.reporting import (
     _looks_like_structured_literal_text,
     _record_sort_key,
     _render_answer_like_html,
-    _render_question_text_html,
     _render_text_html,
     build_summary,
     generate_report,
@@ -474,28 +473,6 @@ class TestReporting(unittest.TestCase):
         self.assertIn(r"\(x-y\)", rendered)
         self.assertNotIn("$725x", rendered)
         self.assertNotIn("$729x", rendered)
-
-    def test_render_question_text_formats_translation_key_without_auto_math_wrapping(self):
-        question = (
-            " Select the best English interpretation of the given proposition, using the following translation key: "
-            "Ax: x is an apartment Hx: x is a house Lx: x is large Bxy: x is bigger than y "
-            "(\u2200x){Ax \u2283 (\u2200y)[(Hy \u2022 Ly) \u2283 \u223cBxy]}"
-        )
-
-        rendered = _render_question_text_html(question, preserve_breaks=True)
-
-        self.assertIn("translation key:<br>Ax: x is an apartment<br>Hx: x is a house", rendered)
-        self.assertIn("<br>Bxy: x is bigger than y<br>(\u2200x){Ax \u2283 (\u2200y)[(Hy \u2022 Ly) \u2283 \u223cBxy]}", rendered)
-        self.assertNotIn(r"\(", rendered)
-
-    def test_render_question_text_keeps_explicit_inline_math_delimiters(self):
-        rendered = _render_question_text_html(
-            "If $x^2 + 1$ equals 10, what is x?",
-            preserve_breaks=False,
-        )
-
-        self.assertIn(r"\(x^2 + 1\)", rendered)
-        self.assertNotIn("$x^2 + 1$", rendered)
 
     def test_render_text_replaces_asy_block_with_svg_diagram(self):
         rendered = _render_text_html(

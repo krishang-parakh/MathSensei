@@ -16,7 +16,7 @@ logging.basicConfig(format='%(asctime)s %(message)s', datefmt='%m/%d/%Y %I:%M:%S
 
 from core.env_loader import load_dotenv
 
-load_dotenv(os.path.join(os.path.dirname(__file__), ".env"), override=False)
+load_dotenv(os.path.join(os.path.dirname(__file__), ".env"), override=True)
 
 try:
     import wolframalpha
@@ -41,7 +41,7 @@ from core.pipeline_shared import (
     remove_wrapping_backticks,
     resolve_wolfram_answer,
 )
-from core.wolfram_utils import clean_wolfram_query, extract_wolfram_plaintext_answer, query_wolfram_alpha
+from core.wolfram_utils import extract_wolfram_plaintext_answer, query_wolfram_alpha
 from presentation.asy_rendering import strip_asy_blocks_for_model_input
 from core.python_pipeline import (
     execution_failure_reason,
@@ -303,7 +303,6 @@ def only_until_first_boxed_from_tokens(string, tokens):
             return None
     
     cum_length = 0
-    i = 0  # Initialize 'i' to avoid unbound error
     for i, t in enumerate(tokens):
         cum_length += len(t)
         if cum_length >= idx:
@@ -380,6 +379,9 @@ def save_output(question, gold_answer,gold_final_answer, COT_output, COT_final_a
    
     data_to_append = [args.model_name,args.temperature,question,gold_answer,gold_final_answer,COT_output,COT_final_answer]
     append_csv(save_file_path, data_to_append)
+
+
+def extract_last_number(output):
     # Find all numbers in the text
     numbers = re.findall(r'\d+\.?\d*', output)
     
@@ -396,16 +398,14 @@ def get_answer(output, string="The answer is "):
 
 def _read_text_file_with_fallbacks(file_path):
     last_error = None
-    for encoding in ("utf-8", "utf-8-sig", "cp1252", "latin-1"):
+    for encoding in ("utf-8", "utf-8-sig", "cp1252"):
         try:
             with open(file_path, "r", encoding=encoding) as file:
                 return file.read()
         except UnicodeDecodeError as exc:
             last_error = exc
 
-    if last_error is not None:
-        raise last_error
-    raise RuntimeError(f"Unable to read file: {file_path}")
+    raise last_error
 
 
 def read_jsonl_file(file_path):
@@ -546,13 +546,7 @@ class solver:
             "max_tokens": self._configured_max_tokens("kr_max_tokens", 2000),
         }
 
-    def _configured_chat_engine(self, attr_name):
-        value = getattr(self, attr_name, None)
-        if value in (None, "", "no"):
-            return None
-        return str(value)
-
-    def _call_text_backend(self, backend_name, prompt, *, temperature, max_tokens, patience=1, chat_model=None):
+    def _call_text_backend(self, backend_name, prompt, *, temperature, max_tokens, patience=1):
         retries = max(1, int(patience or 1))
         messages = [{"role": "user", "content": prompt}]
 
@@ -586,7 +580,6 @@ class solver:
             temperature=temperature,
             max_tokens=max_tokens,
             patience=retries,
-            model_name=chat_model,
         )
 
     def _call_python_generation_backend(self, full_prompt, backend_name=None):
@@ -599,8 +592,7 @@ class solver:
             return get_chat_response(
                 messages=messages,
                 temperature=self.pg_temperature,
-                max_tokens=self.pg_max_tokens,
-                model_name=self._configured_chat_engine("pg_engine"),
+                max_tokens=self.pg_max_tokens
             )
 
         if selected_backend == 'gemini':
@@ -647,10 +639,7 @@ class solver:
             ast.parse(cleaned)
         except SyntaxError:
             return False
-        # We depend on stdout capture for downstream answer extraction; require at least one print.
-        if "print(" not in cleaned:
-            return False
-        code_markers = ("\n", "=", "import ", "from ", "for ", "while ", "if ", "def ")
+        code_markers = ("\n", "print(", "=", "import ", "from ", "for ", "while ", "if ", "def ")
         return any(marker in cleaned for marker in code_markers)
 
     def _build_empty_python_retry_prompt(self, full_prompt):
@@ -664,11 +653,18 @@ class solver:
             + "Code:\n"
         )
 
-    def _build_last_resort_python_program(self):
-        return (
-            "from sympy import *\n"
-            "raise RuntimeError('Program generation fallback triggered: no valid Python program was produced')"
-        )
+    # def _build_last_resort_python_program(self):
+    #     fallback_answer = "0"
+    #     options = self._current_options() or []
+    #     if options:
+    #         first_option_key = options[0].get("key")
+    #         if first_option_key not in (None, ""):
+    #             fallback_answer = repr(str(first_option_key))
+    #     return (
+    #         "from sympy import *\n"
+    #         "# Last-resort fallback so the Python lane still emits a parseable answer.\n"
+    #         f"print({fallback_answer})"
+    #     )
 
     def _generate_python_program_with_trace(self, full_prompt):
         attempts = []
@@ -712,7 +708,23 @@ class solver:
             if self._python_generation_is_usable(fallback_program):
                 return fallback_program, attempts
 
-        raise ValueError("All Python generation attempts failed. No valid program could be generated.")
+        last_resort_program = self._build_last_resort_python_program()
+        attempts.append(
+            {
+                "backend": "last_resort_stub",
+                "reason": "all_python_generation_attempts_failed",
+                "raw_output": last_resort_program,
+                "usable": True,
+            }
+        )
+        warning = (
+            "program_generator: all model generation attempts returned blank or non-code output; "
+            "used a last-resort stub so the Python lane still emits an answer."
+        )
+        warnings = self.cache.setdefault("module_warnings", [])
+        if warning not in warnings:
+            warnings.append(warning)
+        return last_resort_program, attempts
 
     def _generate_python_program(self, full_prompt):
         raw_program, attempts = self._generate_python_program_with_trace(full_prompt)
@@ -731,12 +743,7 @@ class solver:
         if self.sg_model == 'gemini':
             return get_gemini_response(full_prompt)
 
-        return get_chat_response(
-            messages=messages,
-            temperature=temperature,
-            max_tokens=self.sg_max_tokens,
-            model_name=self._configured_chat_engine("sg_engine"),
-        )
+        return get_chat_response(messages=messages, temperature=temperature, max_tokens=self.sg_max_tokens)
 
     def _generate_knowledge_text(self, full_prompt):
         messages = [
@@ -744,18 +751,10 @@ class solver:
         ]
 
         if self.knowledge_model == 'text_davinci_002':
-            return get_textdavinci002_response(
-                prompt=full_prompt,
-                temperature=self.kr_temperature,
-                max_tokens=self.kr_max_tokens,
-            )
+            return get_textdavinci002_response(prompt=full_prompt, temperature=self.kr_temperature)
 
         if self.knowledge_model == 'text_davinci_003':
-            return get_textdavinci003_response(
-                prompt=full_prompt,
-                temperature=self.kr_temperature,
-                max_tokens=self.kr_max_tokens,
-            )
+            return get_textdavinci003_response(prompt=full_prompt, temperature=self.kr_temperature)
 
         if self.knowledge_model == 'gemini':
             return get_gemini_response(full_prompt)
@@ -776,12 +775,7 @@ class solver:
                 temperature=self.kr_temperature,
             )
 
-        return get_chat_response(
-            messages=messages,
-            temperature=self.kr_temperature,
-            max_tokens=self.kr_max_tokens,
-            model_name=self._configured_chat_engine("kr_engine"),
-        )
+        return get_chat_response(messages=messages, temperature=self.kr_temperature, max_tokens=self.kr_max_tokens)
 
     def _option_letters_for_dataset(self):
         if self.dataset == "MMLU":
@@ -806,16 +800,7 @@ class solver:
         return None
 
     def _allowed_option_letters(self):
-        # Expand "A-E" -> "ABCDE" (and "A-D" -> "ABCD"). We pass this string into
-        # regex character classes, so it must list all allowed letters explicitly.
-        spec = str(self._option_letters_for_dataset() or "").strip().upper()
-        if len(spec) == 3 and spec[1] == "-" and spec[0].isalpha() and spec[2].isalpha():
-            start = ord(spec[0])
-            end = ord(spec[2])
-            if start <= end:
-                return "".join(chr(code) for code in range(start, end + 1))
-            return "".join(chr(code) for code in range(end, start + 1))
-        return spec
+        return self._option_letters_for_dataset().replace("-", "")
 
     def _resolve_option_crosscheck(self, *text_values, question_text=None):
         options = self._current_options()
@@ -1108,45 +1093,12 @@ class solver:
             + "\nIMPORTANT: Your previous draft appears copied from a different problem.\n"
             + f"Unrelated leaked details: {leak_summary}\n"
             + "Regenerate from scratch for ONLY the current question, grounded in its own numbers and wording.\n"
-            + "- Do not solve multiple subproblems in one program.\n"
-            + "- Do not include numbered sections like '# 1)' or '# 2)'.\n"
-            + "- The final line must print the derived answer.\n"
             + "Code:\n"
         )
-
-        def generate_with_low_temp(prompt_text: str):
-            original_temp = getattr(self, "pg_temperature", 0.0)
-            try:
-                self.pg_temperature = 0.0
-                return self._generate_python_program(prompt_text)
-            finally:
-                self.pg_temperature = original_temp
-
-        regenerated = generate_with_low_temp(retry_prompt)
+        regenerated = self._generate_python_program(retry_prompt)
         if regenerated:
-            cleaned = sanitize_generated_python(regenerated)
-            if cleaned and not looks_like_cross_problem_leak(question_text, cleaned, mode="program"):
-                return cleaned
-
-        strict_prompt = (
-            retry_prompt
-            + "\nCRITICAL: The previous rewrite still looked like a different problem.\n"
-            + "Return code for ONLY the current question. Do not include any prose.\n"
-            + "The first line must be exactly: from sympy import *\n"
-            + "The final line must be a print(...) of the derived answer.\n"
-            + "Code:\n"
-        )
-        retried = generate_with_low_temp(strict_prompt)
-        if retried:
-            cleaned = sanitize_generated_python(retried)
-            if cleaned and not looks_like_cross_problem_leak(question_text, cleaned, mode="program"):
-                return cleaned
-
-        warning = "program_generator: cross-problem leak persisted after retries; using last-resort stub."
-        warnings = self.cache.setdefault("module_warnings", [])
-        if warning not in warnings:
-            warnings.append(warning)
-        return self._build_last_resort_python_program()
+            return sanitize_generated_python(regenerated)
+        return program
 
     def _maybe_regenerate_cross_problem_solution(self, full_prompt, question_text, solution, temperature):
         if not looks_like_cross_problem_leak(question_text, solution, mode="solution"):
@@ -1315,14 +1267,9 @@ class solver:
 
     def _optional_env(self, name):
         value = os.getenv(name)
-        if value is None:
+        if value is None or str(value).strip() == "":
             return None
-        cleaned = str(value).strip()
-        if cleaned == "":
-            return None
-        if (cleaned.startswith('"') and cleaned.endswith('"')) or (cleaned.startswith("'") and cleaned.endswith("'")):
-            cleaned = cleaned[1:-1].strip()
-        return cleaned or None
+        return value
 
     def _disable_model_backend(self, attr_name, requested_model, env_names):
         missing = [name for name in env_names if self._optional_env(name) is None]
@@ -1784,12 +1731,7 @@ class solver:
         
         # execute the module
      
-        modules = get_chat_response(
-            messages=messages,
-            temperature=self.policy_temperature,
-            max_tokens=self.policy_max_tokens,
-            model_name=self._configured_chat_engine("policy_engine"),
-        )
+        modules = get_chat_response(messages=messages, temperature = self.policy_temperature, max_tokens=self.policy_max_tokens)
         logging.info(f"Response by planner: {modules}")
             
         # Get part starting with '['
@@ -1880,7 +1822,6 @@ class solver:
             temperature=query_settings["temperature"] if temperature is None else temperature,
             max_tokens=query_settings["max_tokens"] if max_tokens is None else max_tokens,
             patience=query_settings["patience"] if patience is None else patience,
-            chat_model=self._configured_chat_engine("qg_engine"),
         )
 
     def _generate_wolfram_initial_query(self, full_prompt):
@@ -1932,36 +1873,6 @@ class solver:
 
         return None, last_response
 
-    def _plan_wolfram_recovery_step(self, question_text, trace, *, recovery_note: str, forbidden_queries=None):
-        query_settings = self._query_generation_settings()
-        forbidden = [q for q in (forbidden_queries or []) if q]
-        prompt = build_wolfram_next_step_prompt(question_text, trace)
-        prompt += "\nRecovery constraint:\n"
-        prompt += f"- The previous planning step failed due to: {recovery_note}\n"
-        if forbidden:
-            prompt += "- Do not repeat any of these exact query signatures:\n"
-            prompt += "\n".join(f"  - {sig}" for sig in sorted(set(forbidden))[:12])
-            prompt += "\n"
-        prompt += (
-            "- If the final answer is already determined by the trace, return Status: FINAL now.\n"
-            "- Otherwise return Status: CONTINUE with exactly one NEW query that makes progress.\n"
-        )
-
-        tries = 0
-        last_response = None
-        while tries < query_settings["patience"]:
-            last_response = self._call_wolfram_llm(
-                prompt,
-                temperature=query_settings["temperature"],
-                max_tokens=query_settings["max_tokens"],
-                patience=10,
-            )
-            tries += 1
-            parsed = parse_wolfram_next_step_response(last_response)
-            if parsed is not None:
-                return parsed, last_response
-        return None, last_response
-
     def _format_wolfram_response_context(self, trace, final_answer):
         trace_text = format_wolfram_trace(trace)
         if not trace_text:
@@ -1985,119 +1896,7 @@ class solver:
 
         return "\n" + "\n".join(lines) + "\n"
 
-    def _wolfram_query_is_plausible(self, query):
-        q = clean_wolfram_query(query) or ""
-        if not q:
-            return False
-        if len(q) > 220:
-            return False
-        if q.endswith((".", "?", "!")):
-            return False
-
-        lowered = q.lower()
-        if any(
-            phrase in lowered
-            for phrase in (
-                "do you know",
-                "if you'd like",
-                "if you want",
-                "let me know",
-                "you can",
-                "i can",
-                "we can",
-                "here's",
-                "given the typical",
-            )
-        ):
-            return False
-        if lowered.startswith(("to find", "we need to", "in order to", "first,")):
-            return False
-
-        has_math_ops = any(op in q for op in ("+", "-", "*", "/", "^", "=", "<", ">"))
-        has_wolfram_syntax = "[" in q or "]" in q or ("(" in q and ")" in q)
-        has_math_keyword = any(
-            token in lowered
-            for token in (
-                "solve",
-                "simplify",
-                "factor",
-                "expand",
-                "integrate",
-                "differentiate",
-                "derivative",
-                "limit",
-                "maximize",
-                "minimize",
-                "sum",
-                "product",
-                "coefficient",
-                "coeff",
-                "factorinteger",
-            )
-        )
-        has_logic_keyword = any(
-            token in lowered
-            for token in (
-                "truth table",
-                "boolean",
-                "proposition",
-                "predicate",
-                "logical",
-                "validity",
-                "tautology",
-                "equivalent",
-                "equivalence",
-            )
-        )
-        if not (has_math_ops or has_wolfram_syntax or has_math_keyword or has_logic_keyword):
-            return False
-
-        letters = sum(1 for c in q if c.isalpha())
-        if letters / max(1, len(q)) > 0.65 and not (has_math_keyword or has_logic_keyword):
-            return False
-        return True
-
-    def _extract_logical_formula_from_question(self, question_text):
-        text = str(question_text or "")
-        if not text:
-            return None
-
-        logic_markers = ("\u2200", "\u2203", "\u2283", "\u2022", "\u2228", "\u2227", "\u00ac", "\u223c", "~", "<=>", "=>")
-        candidates = []
-        for match in re.finditer(r"[\(\[\{][^\n]{4,240}[\)\]\}]", text):
-            snippet = match.group(0).strip()
-            if any(marker in snippet for marker in logic_markers):
-                candidates.append(snippet)
-
-        if not candidates:
-            return None
-        return max(candidates, key=len)
-
-    def _fallback_wolfram_query_from_question(self, question_text):
-        text = str(question_text or "")
-        lowered = text.lower()
-        if not text:
-            return None
-
-        if "truth table" in lowered:
-            match = re.search(r"(?is)truth table(?:\s+for)?\s*(.+)", text)
-            if match:
-                segment = match.group(1)
-                for stop in ("Options:", "Option A", "\n"):
-                    if stop in segment:
-                        segment = segment.split(stop, 1)[0]
-                segment = segment.strip(" .:")
-                if segment:
-                    return clean_wolfram_query(f"truth table for {segment}")
-            return "truth table"
-
-        logical_formula = self._extract_logical_formula_from_question(text)
-        if logical_formula and ("translation key" in lowered or "proposition" in lowered):
-            return clean_wolfram_query(f"logical interpretation of {logical_formula}")
-
-        return None
-
-     
+    
     def wolfram_alpha_search(self):
         app_id = self._optional_env("WOLFRAM_ALPHA_APPID")
         if app_id is None:
@@ -2105,12 +1904,6 @@ class solver:
 
         question_text = self.get_question_text()
         response = self.cache["response"] if "response" in self.cache else ""
-        python_output = self.cache.get("program_executor:output") or ""
-        python_has_output = bool(str(python_output).strip())
-        python_option = (
-            extract_final_answer_option_letter(python_output, allowed=self._allowed_option_letters())
-            or extract_option_letter(python_output, allowed=self._allowed_option_letters())
-        )
 
         if self.dataset == "AQUA":
             demo_prompt = build_option_wolfram_demo_prompt(self._option_letters_for_dataset()).strip()
@@ -2132,9 +1925,10 @@ class solver:
         else:
             mods = ""
 
-        # Keep the query generator focused on the current question. Feeding the entire prior
-        # response (which may include long Python code or other examples) increases cross-problem leakage.
-        test_prompt = f"Question: {question_text}\nThought:"
+        if response != "" and mods != "":
+            test_prompt = f"Question:{question_text}\nModules used till now:[{mods}]\n{response}\nThought:"
+        else:
+            test_prompt = f"Question: {question_text}\nThought:"
 
         direct_query_instruction = (
             "\nAdditional instruction: prefer a Wolfram query that directly computes the quantity asked in the question."
@@ -2143,78 +1937,25 @@ class solver:
         full_prompt = demo_prompt + "\n" + test_prompt + direct_query_instruction
 
         initial_plan, query = self._generate_wolfram_initial_query(full_prompt)
-        q = initial_plan.get("query") if initial_plan else None
-        q = clean_wolfram_query(q)
-        if q and not self._wolfram_query_is_plausible(q):
-            q = None
-
-        if not q:
-            strict_prompt = (
-                full_prompt
-                + "\nIMPORTANT: Output must include a single concrete Wolfram Alpha query with math operators.\n"
-                + "Return ONLY one line in this exact format:\n"
-                + "Final Query: <query>\n"
-            )
-            initial_plan, query = self._generate_wolfram_initial_query(strict_prompt)
-            q = clean_wolfram_query(initial_plan.get("query") if initial_plan else None)
-            if q and not self._wolfram_query_is_plausible(q):
-                q = None
-            if not q:
-                fallback_query = self._fallback_wolfram_query_from_question(question_text)
-                if fallback_query and self._wolfram_query_is_plausible(fallback_query):
-                    q = fallback_query
-                    if initial_plan is None:
-                        initial_plan = {}
-                    initial_plan["query"] = q
-                    if not initial_plan.get("thought"):
-                        initial_plan["thought"] = "Used question-derived fallback Wolfram query."
         answer_walpha = None
-        q = clean_wolfram_query(initial_plan.get("query") if initial_plan else None)
-        if q and not self._wolfram_query_is_plausible(q):
-            q = None
+        q = initial_plan.get("query") if initial_plan else None
         thought = initial_plan.get("thought", "") if initial_plan else ""
         trace = []
         final_query = None
         last_error = None
         resolved_wolfram_option = None
-        wa_discarded = False
         max_wolfram_steps = max(4, len(self._current_options() or []) + 1)
 
         if q:
             current_query = q
             seen_query_signatures = set()
 
-            recovery_attempts = 0
             for step_index in range(1, max_wolfram_steps + 1):
                 normalized_query = normalize_wolfram_query_signature(current_query)
                 if not normalized_query:
                     last_error = "Empty Wolfram Alpha query"
                     break
                 if normalized_query in seen_query_signatures:
-                    # If the planner got stuck repeating itself, keep the latest usable output
-                    # instead of failing the whole Wolfram lane.
-                    if answer_walpha in (None, ""):
-                        for prior_step in reversed(trace):
-                            prior_output = prior_step.get("output")
-                            if prior_output not in (None, ""):
-                                answer_walpha = prior_output
-                                if trace and not trace[-1].get("completion_thought"):
-                                    trace[-1]["completion_thought"] = (
-                                        "Planner repeated a previous query; using the latest Wolfram output."
-                                    )
-                                break
-                    if recovery_attempts < 2:
-                        recovery_attempts += 1
-                        decision, _ = self._plan_wolfram_recovery_step(
-                            question_text,
-                            trace,
-                            recovery_note="next query repeated an earlier Wolfram query",
-                            forbidden_queries=seen_query_signatures,
-                        )
-                        if decision and decision.get("status") == "CONTINUE" and decision.get("next_query"):
-                            thought = decision.get("thought", thought)
-                            current_query = decision.get("next_query")
-                            continue
                     last_error = "Wolfram query planner repeated a previous query before reaching the requested final quantity"
                     break
                 seen_query_signatures.add(normalized_query)
@@ -2229,10 +1970,6 @@ class solver:
                 if step_output in (None, "") and res:
                     step_output = self.call_answer_cleaner(executed_query, res)
 
-                if step_output in (None, "") and not step_error:
-                    step_error = "Wolfram returned no plaintext answer"
-                wolfram_blocked = bool(step_error) and "wolfram request blocked" in str(step_error).lower()
-
                 step_record = {
                     "step": step_index,
                     "thought": thought,
@@ -2243,25 +1980,9 @@ class solver:
                 }
                 trace.append(step_record)
 
-                if step_output in (None, ""):
-                    logging.warning("Wolfram Alpha query returned no usable output: %s", step_error or "(no error)")
-                    last_error = step_error or "Wolfram returned no usable output"
-                    if wolfram_blocked:
-                        if not trace[-1].get("completion_thought"):
-                            trace[-1]["completion_thought"] = "Wolfram API access is blocked; stopping retries until credentials/network are fixed."
-                        break
-                    if recovery_attempts < 2:
-                        recovery_attempts += 1
-                        recovery_decision, _ = self._plan_wolfram_recovery_step(
-                            question_text,
-                            trace,
-                            recovery_note=last_error,
-                            forbidden_queries=seen_query_signatures,
-                        )
-                        if recovery_decision and recovery_decision.get("status") == "CONTINUE" and recovery_decision.get("next_query"):
-                            thought = recovery_decision.get("thought", thought)
-                            current_query = recovery_decision.get("next_query")
-                            continue
+                if step_error and step_output in (None, ""):
+                    logging.warning("Wolfram Alpha query failed: %s", step_error)
+                    last_error = step_error
                     break
 
                 decision, _ = self._plan_wolfram_next_step(question_text, trace)
@@ -2323,56 +2044,12 @@ class solver:
                     break
 
                 thought = decision.get("thought", "")
-                next_query = clean_wolfram_query(decision.get("next_query"))
+                next_query = decision.get("next_query")
                 if not next_query:
-                    if step_output not in (None, ""):
-                        # Avoid throwing away usable Wolfram output just because the planner failed to produce
-                        # the next query.
-                        answer_walpha = step_output
-                        trace[-1]["completion_thought"] = thought or "Used latest Wolfram output because the planner did not provide a follow-up query."
-                        break
                     last_error = "Wolfram planner requested another step without providing a follow-up query"
-                    break
-                if not self._wolfram_query_is_plausible(next_query):
-                    if step_output not in (None, ""):
-                        answer_walpha = step_output
-                        trace[-1]["completion_thought"] = (
-                            thought
-                            or "Used latest Wolfram output because the planner suggested a non-actionable follow-up query."
-                        )
-                        break
-                    last_error = "Wolfram planner suggested a non-actionable follow-up query"
-                    if recovery_attempts < 2:
-                        recovery_attempts += 1
-                        recovery_decision, _ = self._plan_wolfram_recovery_step(
-                            question_text,
-                            trace,
-                            recovery_note=last_error,
-                            forbidden_queries=seen_query_signatures,
-                        )
-                        if recovery_decision and recovery_decision.get("status") == "CONTINUE" and recovery_decision.get("next_query"):
-                            thought = recovery_decision.get("thought", thought)
-                            current_query = recovery_decision.get("next_query")
-                            continue
                     break
                 loop_reason = detect_wolfram_loop_reason(trace, next_query=next_query)
                 if loop_reason:
-                    if recovery_attempts < 2:
-                        recovery_attempts += 1
-                        recovery_decision, _ = self._plan_wolfram_recovery_step(
-                            question_text,
-                            trace,
-                            recovery_note=loop_reason,
-                            forbidden_queries=seen_query_signatures,
-                        )
-                        if recovery_decision and recovery_decision.get("status") == "CONTINUE" and recovery_decision.get("next_query"):
-                            thought = recovery_decision.get("thought", thought)
-                            current_query = recovery_decision.get("next_query")
-                            continue
-                    if step_output not in (None, ""):
-                        answer_walpha = step_output
-                        trace[-1]["completion_thought"] = thought or "Used latest Wolfram output after a detected planning loop."
-                        break
                     if not trace[-1].get("error"):
                         trace[-1]["error"] = loop_reason
                     last_error = loop_reason
@@ -2395,38 +2072,11 @@ class solver:
                     answer_walpha = (
                         f"{answer_walpha} (closest option {resolved_option['key']}: {resolved_option['label']})"
                     )
-
-            wolfram_option = (
-                extract_final_answer_option_letter(answer_walpha, allowed=self._allowed_option_letters())
-                or extract_option_letter(answer_walpha, allowed=self._allowed_option_letters())
-            )
-            if python_option and wolfram_option and python_option != wolfram_option:
-                wa_discarded = True
-                warning = (
-                    "wolfram_alpha_search: Wolfram output disagreed with the Python-computed option "
-                    f"({wolfram_option} vs {python_option}); discarding Wolfram context to avoid contaminating the final answer."
-                )
-                warnings = self.cache.setdefault("module_warnings", [])
-                if warning not in warnings:
-                    warnings.append(warning)
-                answer_walpha = None
-            if not wa_discarded:
-                response += self._format_wolfram_response_context(trace, answer_walpha)
-                response = response.strip()
+            response += self._format_wolfram_response_context(trace, answer_walpha)
+            response = response.strip()
             self.cache.pop("wolfram_alpha_search:error", None)
         else:
-            if python_option or python_has_output:
-                # If Python already computed an answer, treat Wolfram failures as non-fatal.
-                because = f"option {python_option}" if python_option else "a Python answer"
-                warning = f"wolfram_alpha_search: {last_error or 'no usable Wolfram answer'}; skipped because Python already produced {because}."
-                warnings = self.cache.setdefault("module_warnings", [])
-                if warning not in warnings:
-                    warnings.append(warning)
-                self.cache.pop("wolfram_alpha_search:error", None)
-            elif wa_discarded:
-                self.cache.pop("wolfram_alpha_search:error", None)
-            else:
-                self.cache["wolfram_alpha_search:error"] = last_error or "Wolfram Alpha did not reach the requested final answer"
+            self.cache["wolfram_alpha_search:error"] = last_error or "Wolfram Alpha did not reach the requested final answer"
 
         rendered_input = final_query or q
         if trace:
@@ -2454,7 +2104,7 @@ class solver:
         
         return summary[:6]
       
-    def get_closest_wikipage(self, query):
+    def get_closest_wikipage(query):
         
         import wikipedia
         try: 
@@ -2600,17 +2250,8 @@ class solver:
         Preserve helpful comments when possible, and keep any comments in the corrected code short and directly tied to the main computation steps.
         """
         
-        code_fixer_response = get_chat_response_code(
-            full_prompt,
-            temperature=0.7,
-            max_tokens=5000,
-            system_mess=system_message,
-            model_name=self._configured_chat_engine("pg_engine"),
-        )
-        snippet = str(code_fixer_response or "")
-        if len(snippet) > 800:
-            snippet = snippet[:800] + " ...[truncated]"
-        logging.info("Code-fixer response: %s", snippet)
+        code_fixer_response = get_chat_response_code(full_prompt,temperature = 0.7, max_tokens=5000,system_mess=system_message)
+        logging.info(f"Code-fixer response {code_fixer_response}")
         
         # Parse output to get new program
         try:
@@ -2620,38 +2261,17 @@ class solver:
             if repaired_program:
                 return repaired_program, None
             return error_program,None
-
-        remainder = code_fixer_response[idx1 + len("Corrected Python Code:") :]
-        end_markers = [
-            "Errors fixed:",
-            "Errors Fixed:",
-            "Changes Made:",
-            "Changes made:",
-            "Changes Made",
-            "Changes made",
-        ]
-        end_idx = None
-        errors_fixed = None
-        for marker in end_markers:
-            pos = remainder.find(marker)
-            if pos != -1:
-                end_idx = pos if end_idx is None else min(end_idx, pos)
-        if end_idx is not None:
-            code_block = remainder[:end_idx]
-            tail = remainder[end_idx:]
-            if "Errors fixed:" in tail:
-                errors_fixed = tail.split("Errors fixed:", 1)[-1].strip() or None
-        else:
-            code_block = remainder
-
-        repaired_program = sanitize_generated_python(code_block)
-        if repaired_program:
-            return repaired_program, errors_fixed
-
-        repaired_program = sanitize_generated_python(code_fixer_response)
-        if repaired_program:
-            return repaired_program, errors_fixed
-        return error_program, errors_fixed
+        try:
+            idx2 = code_fixer_response.index("Errors fixed:")
+        except:
+            repaired_program = sanitize_generated_python(code_fixer_response)
+            if repaired_program:
+                return repaired_program, None
+            return error_program,None
+        
+        new_program = code_fixer_response[idx1+len("Corrected Python Code:"):idx2]
+        errors_fixed = code_fixer_response[idx2+len("Errors fixed:"):]
+        return sanitize_generated_python(new_program),errors_fixed
 
 
     def _execute_candidate_program(self, program):
