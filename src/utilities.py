@@ -144,7 +144,7 @@ MODEL_NAME = (
     or _clean_env_value(_get_env("MODEL_NAME"))
     or AZURE_DEPLOYMENT_NAME
     or _clean_env_value(_get_env("DEFAULT_ENGINE"))
-    or "gpt-4o"
+    or "model-router"
 )
 
 if STANDARD_OPENAI_API_KEY and AZURE_ENDPOINT and AZURE_DEPLOYMENT_NAME:
@@ -680,8 +680,50 @@ def _apply_stop_sequences(text: str, stop) -> str:
 def _standard_openai_reasoning_kwargs(model_name: str):
     normalized = str(model_name or "").strip().lower()
     if normalized.startswith("gpt-5") or normalized.startswith("o"):
-        return {"reasoning": {"effort": "minimal"}}
+        configured_effort = str(os.getenv("OPENAI_REASONING_EFFORT", "low") or "low").strip().lower()
+        supported_efforts = {"none", "low", "medium", "high", "xhigh"}
+        effort = configured_effort if configured_effort in supported_efforts else "low"
+        return {"reasoning": {"effort": effort}}
     return {}
+
+
+def _extract_supported_reasoning_efforts(error_text: str):
+    message = str(error_text or "")
+    match = re.search(r"Supported values are:\s*(.+?)\.", message, flags=re.IGNORECASE)
+    if not match:
+        return []
+    values = re.findall(r"'([^']+)'", match.group(1))
+    return [value.strip().lower() for value in values if value and value.strip()]
+
+
+def _is_reasoning_effort_unsupported_error(error_text: str) -> bool:
+    lowered = str(error_text or "").lower()
+    return "reasoning.effort" in lowered and "unsupported value" in lowered
+
+
+def _build_reasoning_fallback_kwargs(call_kwargs, error_text):
+    supported_from_error = set(_extract_supported_reasoning_efforts(error_text))
+    configured = str(os.getenv("OPENAI_REASONING_EFFORT", "low") or "low").strip().lower()
+    preferred_order = [configured, "low", "medium", "none", "high", "xhigh"]
+    if supported_from_error:
+        preferred_order = [effort for effort in preferred_order if effort in supported_from_error]
+
+    current_effort = str((call_kwargs.get("reasoning") or {}).get("effort") or "").strip().lower()
+    fallbacks = []
+    seen = set()
+
+    for effort in preferred_order:
+        if not effort or effort == current_effort or effort in seen:
+            continue
+        candidate = dict(call_kwargs)
+        candidate["reasoning"] = {"effort": effort}
+        fallbacks.append(candidate)
+        seen.add(effort)
+
+    without_reasoning = dict(call_kwargs)
+    without_reasoning.pop("reasoning", None)
+    fallbacks.append(without_reasoning)
+    return fallbacks
 
 
 def _standard_openai_supports_temperature(model_name: str) -> bool:
@@ -740,6 +782,14 @@ def _chat_completion_standard_openai(messages, temperature=0.0, max_tokens=5000,
                 fallback_kwargs = dict(call_kwargs)
                 fallback_kwargs.pop("temperature", None)
                 return client.responses.create(**fallback_kwargs)
+            if _is_reasoning_effort_unsupported_error(exc):
+                for fallback_kwargs in _build_reasoning_fallback_kwargs(call_kwargs, exc):
+                    try:
+                        return client.responses.create(**fallback_kwargs)
+                    except Exception as fallback_exc:
+                        if _is_reasoning_effort_unsupported_error(fallback_exc):
+                            continue
+                        raise
             if "model_not_found" in str(exc).lower() or "does not exist" in str(exc).lower():
                 return client.responses.create(**call_kwargs)
             raise
